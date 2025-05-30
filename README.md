@@ -4,7 +4,7 @@
     <img src='SDOpt.png' width='300'>
 </p>
 
-## Module 1. Quantization Model
+## Module 1. Quantization Model: Quantization Aware Training & Post Training Quantization - Unet & Transformer
 ## Module 2. Key-Value Cache (Decode & Greedy) - Auto regressive+Bidirectional Attention
 ## Module 3. Distillation Model: Distill GPT, Tiny LLaMa
 ### 3.1 Num-Inference-steps
