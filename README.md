@@ -1,5 +1,5 @@
 # Diffusion-Model-Optimization
-![Diffusion Opt](SDOpt.png)
+![Diffusion Opt](SDOpt.png =100x100)
 ## Module 1. Quantization Model
 ## Module 2. Key-Value Cache (Decode & Greedy) - Auto regressive+Bidirectional Attention
 ## Module 3. Distillation Model: Distill GPT, Tiny LLaMa
