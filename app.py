@@ -1,23 +1,19 @@
-from cleanfid import fid
-from huggingface_hub import notebook_login, login
-import ImageReward as RM
+from diffusers import DiffusionPipeline, FluxPipeline
+from huggingface_hub import login
 import json
-import lpips
-import matplotlib.pyplot as plt
-import numpy as np
+from metrics import calculate_fid, calculate_lpips, calculate_psnr_resized, compute_image_reward
 from nunchaku import NunchakuFluxTransformer2dModel
 from nunchaku.utils import get_precision
 import os
-from PIL import Image
-from skimage.metrics import peak_signal_noise_ratio
+from resizing_image import resize_images
 import time
 import torch
-import torchvision.transforms as transforms
 from tqdm import tqdm
-
+import threading
+from pynvml import *
 
 # Replace 'YOUR_TOKEN' with your actual Hugging Face token
-login(token="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")
+login(token="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")
 
 coco_dir = "coco"
 annotations_dir = os.path.join(coco_dir, "annotations")
@@ -55,23 +51,13 @@ print(f"Created mapping for {len(image_filename_to_caption)} images.")
 print(f"Extracted dimensions for {len(image_dimensions)} images from annotations.")
 
 # Create a directory to save generated images
-generated_image_dir = "/stable_diffusion_outputs"
+generated_image_dir = "stable_diffusion_outputs"
 # os.makedirs(generated_image_dir, exist_ok=True)
 print(f"Created directory for generated images: {generated_image_dir}")
 
-resized_generated_image_dir = "/resized_stable_diffusion_outputs"
+resized_generated_image_dir = "resized_stable_diffusion_outputs"
 # os.makedirs(resized_generated_image_dir, exist_ok=True)
 print(f"Created directory for resized generated images: {resized_generated_image_dir}")
-
-import time
-import threading
-from pynvml import *
-
-from diffusers import DiffusionPipeline, FluxPipeline
-import torch
-
-from nunchaku import NunchakuFluxTransformer2dModel
-from nunchaku.utils import get_precision
 
 # A list to store VRAM usage samples
 vram_samples = []
@@ -111,14 +97,13 @@ def generate_image_and_monitor(pipeline, prompt, output_path, filename):
     monitor_thread.start()
 
     # Run the image generation function
-    result = None
     generation_time = -1 # Initialize with a value indicating failure
     metadata = {}
-
+    generation_metadata = [] # Danh sách để lưu trữ thông tin metadata cho mỗi ảnh
     try:
         start_time = time.time()
         # Assuming the pipeline expects prompt and returns an image object (e.g., PIL Image)
-        generated_image = pipeline(prompt).images[0] # Assuming the pipeline returns a list of images
+        generated_image = pipeline(prompt, num_inference_steps=50, guidance_scale=3.5).images[0] # Assuming the pipeline returns a list of images
         end_time = time.time()
         generation_time = end_time - start_time
 
@@ -132,7 +117,7 @@ def generate_image_and_monitor(pipeline, prompt, output_path, filename):
             "caption_used": prompt,
             "generation_time": generation_time
         }
-
+        generation_metadata.append(metadata) # Append metadata for this image
         print(f"Image generation completed in {generation_time:.2f} seconds.")
 
     except Exception as e:
@@ -163,13 +148,11 @@ def generate_image_and_monitor(pipeline, prompt, output_path, filename):
     return generation_time, metadata # Return both generation time and metadata
 
 
-
 try:
 # Assuming 'pipeline' and 'image_filename_to_caption' are already defined from previous steps
   precision = get_precision()  # auto-detect your precision is 'int4' or 'fp4' based on your GPU
 # "mit-han-lab/svdq-int4-flux.1-dev"
-  transformer = NunchakuFluxTransformer2dModel.from_pretrained(
-    "mit-han-lab/svdq-int4-flux.1-dev")
+  transformer = NunchakuFluxTransformer2dModel.from_pretrained("mit-han-lab/svdq-int4-flux.1-dev", offload=True)
 # transformer = NunchakuFluxTransformer2dModel.from_pretrained(
 #     f"mit-han-lab/svdq-{precision}-flux.1-schnell"
 # )
@@ -178,15 +161,14 @@ try:
   # pipeline = DiffusionPipeline.from_pretrained("black-forest-labs/FLUX.1-dev",torch_dtype=torch.bfloat16).to("cuda")
   pipeline.enable_model_cpu_offload()
 except Exception as e:
-  print(f"Error loading pipeline: {e}")
+  print(f"Error when loading pipeline: {e}")
   pipeline = None # Set pipeline to None if loading fails
 
 # Limit the number of images to generate for demonstration purposes
-num_images_to_generate = 1 # You can increase this for more comprehensive evaluation
+num_images_to_generate = 500 # You can increase this for more comprehensive evaluation
 
 # Keep track of generation time
 generation_times = {}
-generation_metadata = [] # Danh sách để lưu trữ thông tin metadata cho mỗi ảnh
 
 print(f"Start to generate {min(num_images_to_generate, len(image_filename_to_caption))} images...")
 
@@ -205,10 +187,43 @@ for i, (filename, prompt) in enumerate(tqdm(list(image_filename_to_caption.items
         generation_time, metadata = generate_image_and_monitor(pipeline, prompt, output_path, filename)
         # Add the generation time to the dictionary
         generation_times[filename] = generation_time
-        # The metadata is already appended inside generate_image_and_monitor
-        # No need to append metadata again here.
         print(f"Generated and saved {filename} (Prompt {i+1}/{num_images_to_generate}: {prompt[:50]}...)")
     except Exception as e:
         print(f"Error when generating image for prompt '{prompt[:50]}...': {e}")
         generation_times[filename] = -1 # Indicate an error
 print("Image generation complete.")
+
+# Lưu metadata vào file JSON
+GENERATION_METADATA_FILE = './flux_generation_metadata.json'
+try:
+    with open(GENERATION_METADATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(generation_metadata, f, ensure_ascii=False, indent=4)
+    print(f"Saved info to metadata: {GENERATION_METADATA_FILE}")
+except Exception as e:
+    print(f"Error when saving file metadata JSON: {e}")
+
+# Optional: Print average generation time
+successful_generations = [t for t in generation_times.values() if t > 0]
+if successful_generations:
+    average_time = sum(successful_generations) / len(successful_generations)
+    print(f"Average generation time per image (for successful generations): {average_time:.2f} seconds")
+
+resize_images(generated_image_dir, resized_generated_image_dir, image_dimensions)
+print("Image resizing complete.")
+
+calculate_fid(generated_image_dir, resized_generated_image_dir, val2017_dir)
+print("FID calculation complete.")
+
+compute_image_reward(generated_image_dir, image_filename_to_caption)
+print("Image Reward calculation complete.")
+
+# Get the list of filenames for which resized images were generated successfully
+resized_generated_files = [f for f in os.listdir(resized_generated_image_dir) if os.path.isfile(os.path.join(resized_generated_image_dir, f))]
+
+# Calculate and print the average PSNR for resized images
+calculate_psnr_resized(val2017_dir, resized_generated_image_dir, resized_generated_files)
+print("PSNR calculation for resized images complete.")
+
+generated_files = [f for f in os.listdir(resized_generated_image_dir) if os.path.isfile(os.path.join(resized_generated_image_dir, f))]
+calculate_lpips(val2017_dir, resized_generated_image_dir, generated_files)
+print("LPIPS calculation complete.")
