@@ -8,6 +8,7 @@ from skimage.metrics import peak_signal_noise_ratio
 from tqdm import tqdm
 import lpips
 import torchvision.transforms as transforms
+from transformers import CLIPProcessor, CLIPModel
 
 def calculate_fid(generated_image_dir, resized_generated_image_dir, val2017_dir):
     """
@@ -190,3 +191,97 @@ def calculate_lpips(original_dir, generated_dir, filenames):
     except Exception as e:
         print(f"Error loading LPIPS model or during computation: {e}")
         return None
+    
+def calculate_clip_score(generated_image_dir, captions):
+    # --- Bắt đầu phần tính toán CLIP Score ---
+    print("\n--- Calculating CLIP Score ---")
+
+    # Đường dẫn đến thư mục chứa ảnh đã tạo
+    image_files = [f for f in os.listdir(generated_image_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
+
+    if not image_files:
+        print(f"Error: Generated image directory not found or empty: {generated_image_dir}")
+        print("Cannot calculate CLIP Score without generated images and corresponding prompts.")
+    else:
+        images_to_process = []
+        texts_to_process = []
+
+        # Use the actual captions from the dictionary for the generated images
+        for filename in image_files:
+            img_path = os.path.join(generated_image_dir, filename)
+            # Get the corresponding caption using the filename as the key
+            if filename in captions: # Corrected variable name from image_filename_to_caption to captions
+                prompt = captions[filename]
+                try:
+                    img = Image.open(img_path).convert("RGB")
+                    images_to_process.append(img)
+                    texts_to_process.append(prompt)
+                except Exception as e:
+                    print(f"Could not load image {img_path}: {e}")
+                    continue
+            else:
+                print(f"Warning: No caption found for image {filename}. Skipping.")
+
+        if not images_to_process:
+            print("No valid images found to calculate CLIP Score.")
+        else:
+            try:
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                print(f"Using device: {device}")
+
+                # Load pre-trained CLIP model and processor
+                model_name = "openai/clip-vit-base-patch32"
+                processor = CLIPProcessor.from_pretrained(model_name)
+                model = CLIPModel.from_pretrained(model_name).to(device)
+
+                clip_scores = []
+                batch_size = 32 # Có thể điều chỉnh batch_size tùy theo RAM GPU
+
+                for i in tqdm(range(0, len(images_to_process), batch_size), desc="Calculating CLIP Scores"):
+                    batch_images = images_to_process[i:i + batch_size]
+                    batch_texts = texts_to_process[i:i + batch_size]
+
+                    if not batch_images: # Xử lý trường hợp batch rỗng cuối cùng
+                        continue
+
+                    # Preprocess images and tokenize texts
+                    inputs = processor(text=batch_texts, images=batch_images, return_tensors="pt", padding=True)
+
+                    # Move inputs to device
+                    inputs = {k: v.to(device) for k, v in inputs.items()}
+
+                    with torch.no_grad():
+                        outputs = model(**inputs)
+
+                    # A simple CLIP Score definition for text-to-image is often
+                    # the cosine similarity between image and text features, scaled by 100.
+
+                    image_features = outputs.image_embeds
+                    text_features = outputs.text_embeds
+
+                    # Normalize features
+                    image_features = image_features / image_features.norm(p=2, dim=-1, keepdim=True)
+                    text_features = text_features / text_features.norm(p=2, dim=-1, keepdim=True)
+
+                    # Calculate cosine similarity for each pair
+                    # Shape: (batch_size, 1) if multiplying features directly for each pair
+                    # Or, using torch.nn.functional.cosine_similarity
+
+                    # Using the original scaling from CLIP
+                    logit_scale = model.logit_scale.exp()
+                    batch_clip_scores = logit_scale * torch.sum(image_features * text_features, dim=1)
+
+                    # Take max(0, score) as per some CLIP Score definitions
+                    batch_clip_scores = torch.max(torch.zeros_like(batch_clip_scores), batch_clip_scores)
+
+                    # Detach the tensor before converting to numpy
+                    clip_scores.extend(batch_clip_scores.detach().cpu().numpy())
+
+                if clip_scores:
+                    avg_clip_score = np.mean(clip_scores)
+                    print(f"\nAverage CLIP Score: {avg_clip_score:.2f}")
+                else:
+                    print("No CLIP scores calculated.")
+
+            except Exception as e:
+                print(f"Error when calculating CLIP Score: {e}")

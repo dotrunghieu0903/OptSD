@@ -1,7 +1,7 @@
 from diffusers import DiffusionPipeline, FluxPipeline
 from huggingface_hub import login
 import json
-from metrics import calculate_fid, calculate_lpips, calculate_psnr_resized, compute_image_reward
+from metrics import calculate_clip_score, calculate_fid, calculate_lpips, calculate_psnr_resized, compute_image_reward
 from nunchaku import NunchakuFluxTransformer2dModel
 from nunchaku.utils import get_precision
 import os
@@ -82,6 +82,7 @@ def monitor_vram(device_index=0):
             break
     nvmlShutdown()
 
+generation_metadata = [] # Danh sách để lưu trữ thông tin metadata cho mỗi ảnh
 def generate_image_and_monitor(pipeline, prompt, output_path, filename):
     """
     Generates an image using the provided pipeline while monitoring VRAM.
@@ -99,7 +100,6 @@ def generate_image_and_monitor(pipeline, prompt, output_path, filename):
     # Run the image generation function
     generation_time = -1 # Initialize with a value indicating failure
     metadata = {}
-    generation_metadata = [] # Danh sách để lưu trữ thông tin metadata cho mỗi ảnh
     try:
         start_time = time.time()
         # Assuming the pipeline expects prompt and returns an image object (e.g., PIL Image)
@@ -147,7 +147,6 @@ def generate_image_and_monitor(pipeline, prompt, output_path, filename):
 
     return generation_time, metadata # Return both generation time and metadata
 
-
 try:
 # Assuming 'pipeline' and 'image_filename_to_caption' are already defined from previous steps
   precision = get_precision()  # auto-detect your precision is 'int4' or 'fp4' based on your GPU
@@ -182,8 +181,7 @@ for i, (filename, prompt) in enumerate(tqdm(list(image_filename_to_caption.items
         print(f"Skipping generation for {filename} (already exists)")
         continue
     try:
-        # Generate image and monitor VRAM
-        # The generate_image_and_monitor function already saves the image and appends metadata
+        # Generate image and monitor VRAM. The generate_image_and_monitor function already saves the image and appends metadata
         generation_time, metadata = generate_image_and_monitor(pipeline, prompt, output_path, filename)
         # Add the generation time to the dictionary
         generation_times[filename] = generation_time
@@ -227,3 +225,6 @@ print("PSNR calculation for resized images complete.")
 generated_files = [f for f in os.listdir(resized_generated_image_dir) if os.path.isfile(os.path.join(resized_generated_image_dir, f))]
 calculate_lpips(val2017_dir, resized_generated_image_dir, generated_files)
 print("LPIPS calculation complete.")
+
+calculate_clip_score(resized_generated_image_dir, image_filename_to_caption)
+print("CLIP score calculation complete.")
