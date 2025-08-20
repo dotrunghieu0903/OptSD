@@ -1,10 +1,10 @@
 {
     "optimization": {
-        "apply_pruning": true,
+        "apply_pruning": false,
         "apply_quantization": true,
         "is_optimization_enabled": true
     },
-    "optimization_params": {
+    "model_params": {
         "pruning_amount": 0.3,
         "pruning_method": "magnitude",
         "bits": 4,
@@ -14,7 +14,8 @@
         "steps": 25,
         "guidance_scale": 7.5,
         "skip_metrics": false,
-        "metrics_subset": 100
+        "metrics_subset": 100,
+        "model_name": "Flux.1-schnell"
     },
     "models": {
         "Flux.1-schnell": {

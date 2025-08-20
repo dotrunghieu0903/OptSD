@@ -19,6 +19,7 @@ def main():
     parser.add_argument("--skip_metrics", action="store_true", help="Skip calculation of image quality metrics")
     parser.add_argument("--metrics_subset", type=int, help="Number of images to use for metrics calculation")
     parser.add_argument("--precision", type=str, help="Precision to use for quantization (e.g., 'int4', 'int8')")
+    parser.add_argument("--model_name", type=str, default=None, help="Name of the model to use from config.json")
     args = parser.parse_args()
 
     # Step 0: Load settings from config.json
@@ -31,8 +32,8 @@ def main():
 
     # Create a dictionary of arguments to pass to the optimization modules
     opt_args = {}
-    if "optimization_params" in config:
-        opt_args = config["optimization_params"]
+    if "model_params" in config:
+        opt_args = config["model_params"]
     
     # Override with command line arguments if provided
     if args.num_images is not None:
@@ -47,13 +48,15 @@ def main():
         opt_args["metrics_subset"] = args.metrics_subset
     if args.precision is not None:
         opt_args["precision"] = args.precision
+    if args.model_name is not None:
+        opt_args["model_name"] = args.model_name
+
+    # Convert dictionary to namespace for passing to module functions
+    from argparse import Namespace
+    module_args = Namespace(**opt_args)
 
     if is_optimization_enabled:
         print("Optimization model is enabled.")
-        
-        # Convert dictionary to namespace for passing to module functions
-        from argparse import Namespace
-        module_args = Namespace(**opt_args)
         
         # Apply both quantization and pruning if specified
         if apply_pruning and apply_quantization:
@@ -96,23 +99,32 @@ def main():
     else:
         print("Optimization model is not enabled.")
         # Proceed with normal operations model without optimization
-        
-        # Step 1: Load dataset for example MS COCO 2017 or Flickr30k
-        dataset = config["dataset"]
-        print(f"Loading dataset: {dataset['name']}")
-        # Call the dataset loading function here
+        try:
+            # Add the project root to path to ensure modules can be imported
+            sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+            
+            # Import the normal image generation module
+            from normal.normal_coco import main as normal_main
+            normal_main(module_args)
+        except ImportError as e:
+            print(f"Error when importing normal module: {e}")
 
-        # Step 2: Preprocess the dataset
-        print("Preprocessing dataset...")
-        # Call the preprocessing function here
+    # # Step 1: Load dataset for example MS COCO 2017 or Flickr30k
+    # dataset = config["dataset"]
+    # print(f"Loading dataset: {dataset['name']}")
+    # # Call the dataset loading function here
 
-        # Step 3: Generate images
-        print("Generating images...")
-        # Call the image generation function here
+    # # Step 2: Preprocess the dataset
+    # print("Preprocessing dataset...")
+    # # Call the preprocessing function here
 
-        # Step 4: Evaluate generated images
-        print("Evaluating generated images...")
-        # Call the evaluation function here with defined metrics
+    # # Step 3: Generate images
+    # print("Generating images...")
+    # # Call the image generation function here
+
+    # # Step 4: Evaluate generated images
+    # print("Evaluating generated images...")
+    # # Call the evaluation function here with defined metrics
 
 if __name__ == "__main__":
     main()
