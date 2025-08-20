@@ -1,54 +1,124 @@
+#!/usr/bin/env python3
+
+import argparse
+import gc
+import json
+import os
+from PIL import Image
+import torch
+from tqdm import tqdm
+
 from diffusers import FluxPipeline
 from huggingface_hub import login
 from metrics import calculate_clip_score, calculate_fid, calculate_lpips, calculate_psnr_resized, compute_image_reward
 from nunchaku import NunchakuFluxTransformer2dModel
 from nunchaku.utils import get_precision
-import os
 from quantization.preprocessing import preprocessing_coco
 from resizing_image import resize_images
 from shared.resources_monitor import generate_image_and_monitor, write_generation_metadata_to_file
-import torch
-from tqdm import tqdm
-from PIL import Image
-import json
 
-# Replace 'YOUR_TOKEN' with your actual Hugging Face token
-login(token="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")
+def setup_memory_optimizations():
+    """Apply memory optimizations to avoid CUDA OOM errors"""
+    # PyTorch memory optimizations
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
 
-coco_dir = "coco"
-annotations_dir = os.path.join(coco_dir, "annotations")
-val2017_dir = os.path.join(coco_dir, "val2017")
+def main():
+    # Setup argument parser
+    parser = argparse.ArgumentParser(description="Quantization with COCO dataset")
+    parser.add_argument("--precision", type=str, default=None, 
+                        help="Precision to use (default is auto-detected)")
+    parser.add_argument("--num_images", type=int, default=500,
+                        help="Number of COCO images to process")
+    parser.add_argument("--steps", type=int, default=30,
+                        help="Number of inference steps")
+    parser.add_argument("--guidance_scale", type=float, default=3.5,
+                        help="Guidance scale for image generation")
+    parser.add_argument("--skip_metrics", action="store_true",
+                        help="Skip calculation of image quality metrics")
+    parser.add_argument("--metrics_subset", type=int, default=100,
+                        help="Number of images to use for metrics calculation (default: 100)")
+    args = parser.parse_args()
+    
+    # Apply memory optimizations
+    setup_memory_optimizations()
 
-image_filename_to_caption, image_dimensions, image_id_to_dimensions = preprocessing_coco(annotations_dir)
+    # Replace 'YOUR_TOKEN' with your actual Hugging Face token
+    login(token="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")
 
-# Create a directory to save generated images
-generated_image_dir = "quantization/sd_outputs"
-os.makedirs(generated_image_dir, exist_ok=True)
-print(f"Created directory for generated images: {generated_image_dir}")
+    coco_dir = "coco"
+    annotations_dir = os.path.join(coco_dir, "annotations")
+    val2017_dir = os.path.join(coco_dir, "val2017")
 
-resized_generated_image_dir = "quantization/resized_sd_outputs"
-os.makedirs(resized_generated_image_dir, exist_ok=True)
-print(f"Created directory for resized generated images: {resized_generated_image_dir}")
+    image_filename_to_caption, image_dimensions, image_id_to_dimensions = preprocessing_coco(annotations_dir)
 
-# Limit the number of images to generate for demonstration purposes
-num_images_to_generate = 500
+    # Create a directory to save generated images
+    generated_image_dir = "quantization/sd_outputs"
+    os.makedirs(generated_image_dir, exist_ok=True)
+    print(f"Created directory for generated images: {generated_image_dir}")
 
-try:
-# Assuming 'pipeline' and 'image_filename_to_caption' are already defined from previous steps
-# auto-detect your precision is 'int4' or 'fp4' based on your GPU
-  precision = get_precision()
-# "mit-han-lab/svdq-int4-flux.1-dev"
-  transformer = NunchakuFluxTransformer2dModel.from_pretrained(f"mit-han-lab/svdq-{precision}-flux.1-dev", offload=True)
-# transformer = NunchakuFluxTransformer2dModel.from_pretrained(
-#     f"mit-han-lab/svdq-{precision}-flux.1-schnell"
-# )
-  pipeline = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-dev", transformer=transformer, torch_dtype=torch.bfloat16).to("cuda")
+    resized_generated_image_dir = "quantization/resized_sd_outputs"
+    os.makedirs(resized_generated_image_dir, exist_ok=True)
+    print(f"Created directory for resized generated images: {resized_generated_image_dir}")
 
-  # pipeline = DiffusionPipeline.from_pretrained("black-forest-labs/FLUX.1-dev",torch_dtype=torch.bfloat16).to("cuda")
-  pipeline.enable_model_cpu_offload()
-except Exception as e:
-  print(f"Error when loading pipeline: {e}")
-  pipeline = None # Set pipeline to None if loading fails
+    # Limit the number of images to generate based on the command-line argument
+    num_images_to_generate = args.num_images
+
+def load_model(precision_override=None):
+    """Load the model with specified precision or auto-detect"""
+    try:
+        # Auto-detect precision if not specified
+        precision = precision_override if precision_override else get_precision()
+        print(f"Using precision: {precision}")
+        
+        # Load transformer model
+        transformer = NunchakuFluxTransformer2dModel.from_pretrained(
+            f"mit-han-lab/svdq-{precision}-flux.1-dev", 
+            offload=True
+        )
+        return transformer, precision
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        raise
+
+def create_pipeline(transformer):
+    """Create pipeline from transformer model"""
+    pipeline = FluxPipeline.from_pretrained(
+        "black-forest-labs/FLUX.1-dev", 
+        transformer=transformer, 
+        torch_dtype=torch.bfloat16
+    ).to("cuda")
+    
+    pipeline.enable_model_cpu_offload()
+    return pipeline
+
+# In main function:
+    try:
+        # Load model with specified precision or auto-detect
+        transformer, precision = load_model(args.precision)
+        
+        # Create pipeline
+        pipeline = create_pipeline(transformer)
+        print("Pipeline created successfully")
+        
+        # Test the pipeline with a simple prompt to ensure it works
+        print("Testing pipeline with a simple prompt...")
+        test_image = pipeline(
+            "a high quality photo of a motorcycle",
+            num_inference_steps=1,
+            guidance_scale=7.5
+        ).images[0]
+        print("Pipeline test successful!")
+        
+        # Clear memory
+        del test_image
+        torch.cuda.empty_cache()
+        gc.collect()
+        
+    except Exception as e:
+        print(f"Error when loading pipeline: {e}")
+        pipeline = None  # Set pipeline to None if loading fails
 
 # Keep track of generation time
 generation_times = {}

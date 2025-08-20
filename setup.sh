@@ -16,3 +16,9 @@ unzip coco/annotations_trainval2017.zip -d coco
 
 # Run quantization + pruning module
 ./pruning/run_quant_pruning.sh
+
+# Run pruning evaluation
+./pruning/run_pruning.sh
+
+# Run quantization
+./quantization/run_quantization.sh
