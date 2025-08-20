@@ -6,12 +6,12 @@
 cd "$(dirname "$0")/.."
 
 # Create output directory
-mkdir -p quant_pruning_outputs
+#mkdir -p pruning/quant_pruning_outputs
 
 echo "Running combined quantization and pruning with COCO dataset..."
 
 # Clean up any existing output directory
-rm -rf quant_pruning_outputs/*
+rm -rf pruning/quant_pruning_outputs/*
 
 # Run with reduced steps for faster processing
 python pruning/quant_pruning_coco.py \

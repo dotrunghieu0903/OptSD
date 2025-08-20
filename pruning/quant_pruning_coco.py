@@ -4,6 +4,30 @@ This script applies both quantization and pruning techniques to a diffusion mode
 and evaluates performance on 500 captions from the COCO dataset.
 It also calculates image quality metrics: FID, CLIP Score, ImageReward, LPIPS, and PSNR.
 """
+import os
+import sys
+import gc
+import json
+import random
+import argparse
+import itertools
+from tqdm import tqdm
+from PIL import Image
+
+# Add parent directory to path for importing modules
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from shared.resources_monitor import generate_image_and_monitor
+from metrics import calculate_fid, compute_image_reward, calculate_clip_score, calculate_lpips, calculate_psnr_resized
+from resizing_image import resize_images
+
+# Import from pruning module
+from pruning import get_model_size, get_sparsity, apply_magnitude_pruning
+
+import torch
+from huggingface_hub import login
+from diffusers import FluxPipeline
+from nunchaku import NunchakuFluxTransformer2dModel
+from nunchaku.utils import get_precision
 
 import os
 import gc
@@ -71,39 +95,10 @@ def get_model_size(model):
     size_mb = (param_size + buffer_size) / 1024**2
     return size_mb
 
-def get_sparsity(model):
-    """Calculate the sparsity of the model."""
-    total_params = 0
-    zero_params = 0
-    
-    for param in model.parameters():
-        if param.requires_grad:
-            total_params += param.numel()
-            zero_params += (param == 0).sum().item()
-    
-    sparsity = 100.0 * zero_params / total_params if total_params > 0 else 0
-    return sparsity
-
-def apply_magnitude_pruning(model, amount=0.3):
-    """
-    Apply magnitude pruning to the model parameters.
-    
-    Args:
-        model: The model to prune
-        amount: The fraction of parameters to prune (0.0 to 1.0)
-        
-    Returns:
-        The pruned model
-    """
-    for name, module in model.named_modules():
-        if isinstance(module, nn.Linear) or isinstance(module, nn.Conv2d):
-            prune.l1_unstructured(module, name='weight', amount=amount)
-            # Make pruning permanent by removing the mask
-            prune.remove(module, 'weight')
-    
-    print(f"Applied {amount*100:.1f}% magnitude pruning to model")
-    print(f"Model sparsity after pruning: {get_sparsity(model):.2f}%")
-    return model
+# These functions are now imported from pruning.py
+# - get_model_size
+# - get_sparsity
+# - apply_magnitude_pruning
 
 def load_model(precision=None):
     """
@@ -119,7 +114,7 @@ def load_model(precision=None):
         # Auto-detect precision
         precision = get_precision()
         print(f"Detected precision: {precision}")
-    
+
     # Load the quantized transformer model - use int4 for best quantization
     print(f"Loading model with int4 quantization...")
     model_path = "mit-han-lab/svdq-int4-flux.1-dev"
@@ -360,6 +355,7 @@ def main():
     # 3. Apply pruning to the quantized model
     print("\n=== Applying Pruning to Quantized Model ===")
     try:
+        # Use apply_magnitude_pruning from the pruning module
         pruned_transformer = apply_magnitude_pruning(transformer, amount=args.pruning_amount)
         combined_size = get_model_size(pruned_transformer)
         print(f"Combined (quantized+pruned) model size: {combined_size:.2f} MB")
