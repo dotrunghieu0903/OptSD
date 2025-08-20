@@ -18,3 +18,8 @@
 ## Module 4. Flash Attention
 ## Module 5. PEFT(Parameter-Efficient-Fine-Tuning)/LoRA
 ## Module 6. Early Exit
+## Module 7. Model Pruning
+### 7.1 Magnitude Pruning
+### 7.2 Structured Pruning
+### 7.3 Layerwise Pruning
+### 7.4 Attention Head Pruning

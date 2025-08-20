@@ -16,15 +16,15 @@ def calculate_fid(generated_image_dir, resized_generated_image_dir, val2017_dir)
     """
     if not os.path.exists(generated_image_dir):
         print(f"Error: Generated image directory does not exist: {generated_image_dir}")
-        return
+        return None
 
     if not os.path.exists(resized_generated_image_dir):
         print(f"Error: Resized generated image directory does not exist: {resized_generated_image_dir}")
-        return
+        return None
 
     if not os.path.exists(val2017_dir):
         print(f"Error: COCO validation directory does not exist: {val2017_dir}")
-        return
+        return None
     print(f"Calculating FID between COCO dataset: {val2017_dir}, Generated Image: {generated_image_dir}")
 
     # Make sure the directories exist and contain images before calculating FID
@@ -36,8 +36,10 @@ def calculate_fid(generated_image_dir, resized_generated_image_dir, val2017_dir)
                                     batch_size=256) # Adjust based on your GPU memory
 
         print(f"FID Score: {score_fid:.2f}")
+        return score_fid
     except Exception as e:
         print(f"Error when calculating FID: {e}")
+        return None
 
 # Calculate Image Reward
 def compute_image_reward(generated_dirpath, captions_dict):
@@ -280,8 +282,11 @@ def calculate_clip_score(generated_image_dir, captions):
                 if clip_scores:
                     avg_clip_score = np.mean(clip_scores)
                     print(f"\nAverage CLIP Score: {avg_clip_score:.2f}")
+                    return avg_clip_score
                 else:
                     print("No CLIP scores calculated.")
+                    return None
 
             except Exception as e:
                 print(f"Error when calculating CLIP Score: {e}")
+                return None
