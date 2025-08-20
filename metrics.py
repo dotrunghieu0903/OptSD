@@ -29,11 +29,13 @@ def calculate_fid(generated_image_dir, resized_generated_image_dir, val2017_dir)
 
     # Make sure the directories exist and contain images before calculating FID
     try:
-        score_fid = fid.compute_fid(val2017_dir,
-                                    resized_generated_image_dir,
-                                    mode="clean", # Use the 'clean' mode for the official cleanfid scores
-                                    num_workers=8, # Adjust based on your CPU cores
-                                    batch_size=256) # Adjust based on your GPU memory
+        score_fid = fid.compute_fid(
+            val2017_dir,
+            resized_generated_image_dir,
+            mode="clean",  # Use the 'clean' mode for the official cleanfid scores
+            num_workers=8,  # Adjust based on your CPU cores
+            batch_size=256  # Adjust based on your GPU memory
+        )
 
         print(f"FID Score: {score_fid:.2f}")
         return score_fid
@@ -195,10 +197,10 @@ def calculate_lpips(original_dir, generated_dir, filenames):
         return None
     
 def calculate_clip_score(generated_image_dir, captions):
-    # --- Bắt đầu phần tính toán CLIP Score ---
-    print("\n--- Calculating CLIP Score ---")
+    # --- Starting CLIP Score Calculation ---
+    print("\n--- Starting CLIP Score Calculation ---")
 
-    # Đường dẫn đến thư mục chứa ảnh đã tạo
+    # Path to the directory containing generated images
     image_files = [f for f in os.listdir(generated_image_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
 
     if not image_files:
@@ -237,13 +239,13 @@ def calculate_clip_score(generated_image_dir, captions):
                 model = CLIPModel.from_pretrained(model_name).to(device)
 
                 clip_scores = []
-                batch_size = 32 # Có thể điều chỉnh batch_size tùy theo RAM GPU
+                batch_size = 32 # Can adjust batch_size according to GPU RAM
 
                 for i in tqdm(range(0, len(images_to_process), batch_size), desc="Calculating CLIP Scores"):
                     batch_images = images_to_process[i:i + batch_size]
                     batch_texts = texts_to_process[i:i + batch_size]
 
-                    if not batch_images: # Xử lý trường hợp batch rỗng cuối cùng
+                    if not batch_images: # Handle empty batch case
                         continue
 
                     # Preprocess images and tokenize texts

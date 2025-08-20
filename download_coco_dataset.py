@@ -1,12 +1,9 @@
 from huggingface_hub import login
-import json
-import os
-
-# Download and extract COCO dataset
 import os
 import requests
 import zipfile
 
+# DONT NEED RUN THIS ONE INCASE DOWNLOAD MANUALLY BY COMMAND AT setup.sh file
 # Replace 'YOUR_TOKEN' with your actual Hugging Face token
 login(token="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")
 
@@ -15,8 +12,8 @@ annotations_dir = os.path.join(coco_dir, "annotations")
 val2017_dir = os.path.join(coco_dir, "val2017")
 
 # Create directories if they don't exist
-# os.makedirs(annotations_dir, exist_ok=True)
-# os.makedirs(val2017_dir, exist_ok=True)
+os.makedirs(annotations_dir, exist_ok=True)
+os.makedirs(val2017_dir, exist_ok=True)
 
 def download_file(url, dest):
     response = requests.get(url, stream=True)

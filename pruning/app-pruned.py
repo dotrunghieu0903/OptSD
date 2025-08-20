@@ -159,6 +159,7 @@ def generate_image(pipeline, prompt, num_inference_steps=50, guidance_scale=3.5,
             guidance_scale=guidance_scale,
             **pipeline_params
         ).images[0]
+    # Measure generation time
     generation_time = time.time() - start_time
     
     # Free memory again after generation
@@ -169,8 +170,6 @@ def generate_image(pipeline, prompt, num_inference_steps=50, guidance_scale=3.5,
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         image.save(output_path)
         print(f"\n✅ Image saved to: {output_path}")
-        print(f"========================")
-        print(f"IMAGE SAVED TO: {output_path}")
         print(f"========================")
     
     return image, generation_time
@@ -223,7 +222,7 @@ def main():
     args = parser.parse_args()
     
     # Create output directory
-    output_dir = "combined_quant_pruning_outputs"
+    output_dir = "quant_pruning_outputs"
     os.makedirs(output_dir, exist_ok=True)
     
     # 1. Load the model with original weights
@@ -386,8 +385,7 @@ def main():
                 if metric_value is not None:
                     f.write(f"{metric_name.upper()}: {metric_value:.4f}\n")
     
-    print(f"Results saved to {output_dir}")
-    print("Done!")
+    print(f"Completed. Results saved to {output_dir}")
 
 if __name__ == "__main__":
     main()

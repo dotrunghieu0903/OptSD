@@ -5,54 +5,28 @@ and evaluates performance on 500 captions from the COCO dataset.
 It also calculates image quality metrics: FID, CLIP Score, ImageReward, LPIPS, and PSNR.
 """
 
-# Import all required packages - these should be available in the conda environment
-
 import os
 import gc
 import argparse
-import torch
-import random
-import threading
 import json
-import itertools
-import numpy as np
 from tqdm import tqdm
 import sys
 from PIL import Image
 
-# Add parent directory to path for importing metrics and resizing
+# Add parent directory to path for importing modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from shared.resources_monitor import generate_image_and_monitor
 from metrics import calculate_fid, compute_image_reward, calculate_clip_score, calculate_lpips, calculate_psnr_resized
 from resizing_image import resize_images
-import os
-import time
-import json
-import gc
-import argparse
-import threading
 
 import torch
 import torch.nn as nn
 import torch.nn.utils.prune as prune
 
-from tqdm import tqdm
-
 from huggingface_hub import login
 from diffusers import FluxPipeline
 from nunchaku import NunchakuFluxTransformer2dModel
 from nunchaku.utils import get_precision
-
-print("Importing GPU monitoring...")
-try:
-    from nvidia_ml_py import nvidia_smi
-    USE_NVIDIA_SMI = True
-except ImportError:
-    try:
-        from pynvml import *
-        USE_NVIDIA_SMI = False
-    except ImportError:
-        print("Warning: Neither nvidia_smi nor pynvml available for GPU monitoring")
-        USE_NVIDIA_SMI = None
 
 # Configure PyTorch memory management
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -327,134 +301,6 @@ def load_coco_captions(annotations_file, limit=500):
     
     return image_filename_to_caption, image_dimensions
 
-# A list to store VRAM usage samples
-vram_samples = []
-stop_monitoring = threading.Event()
-
-def monitor_vram(device_index=0):
-    """
-    Monitors VRAM usage of a specified GPU at a regular interval.
-    """
-    if USE_NVIDIA_SMI is None:
-        # If no GPU monitoring available, just return
-        return
-    
-    if USE_NVIDIA_SMI:
-        # Use nvidia_smi
-        nvidia_smi.nvmlInit()
-        handle = nvidia_smi.nvmlDeviceGetHandleByIndex(device_index)
-        
-        while not stop_monitoring.is_set():
-            try:
-                info = nvidia_smi.nvmlDeviceGetMemoryInfo(handle)
-                # Convert bytes to GB
-                used_vram_gb = info.used / 1024**3
-                vram_samples.append(used_vram_gb)
-                time.sleep(0.1)  # Sample every 100 milliseconds
-            except Exception as error:
-                print(f"Error during VRAM monitoring: {error}")
-                break
-        nvidia_smi.nvmlShutdown()
-    else:
-        # Use pynvml
-        try:
-            nvmlInit()
-            handle = nvmlDeviceGetHandleByIndex(device_index)
-            
-            while not stop_monitoring.is_set():
-                try:
-                    info = nvmlDeviceGetMemoryInfo(handle)
-                    # Convert bytes to GB
-                    used_vram_gb = info.used / 1024**3
-                    vram_samples.append(used_vram_gb)
-                    time.sleep(0.1)  # Sample every 100 milliseconds
-                except Exception as error:
-                    print(f"Error during VRAM monitoring: {error}")
-                    break
-            nvmlShutdown()
-        except Exception as e:
-            print(f"Error initializing VRAM monitoring: {e}")
-            return
-
-def generate_image_and_monitor(pipeline, prompt, output_path, filename, num_inference_steps=50, guidance_scale=3.5):
-    """
-    Generates an image using the provided pipeline while monitoring VRAM.
-    Returns generation time and metadata.
-    """
-    # Reset VRAM samples and stop event for this run
-    global vram_samples
-    vram_samples = []
-    stop_monitoring.clear()
-
-    # Start the monitoring thread
-    monitor_thread = threading.Thread(target=monitor_vram)
-    monitor_thread.start()
-
-    # Free up CUDA cache before generation
-    torch.cuda.empty_cache()
-
-    # Run the image generation function
-    generation_time = -1  # Initialize with a value indicating failure
-    metadata = {}
-    
-    try:
-        # Using the exact same parameters as in app.py
-        start_time = time.time()
-        # Use the same parameters as app.py: num_inference_steps=50, guidance_scale=3.5
-        generated_image = pipeline(
-            prompt,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale
-        ).images[0]
-        end_time = time.time()
-        generation_time = end_time - start_time
-                         
-        # Save the image since it's not black
-        generated_image.save(output_path)
-        print(f"\n✅ Image saved to: {output_path}")
-        
-        # Attempt to display the image path in a way that's easier to find
-        print(f"========================")
-        print(f"IMAGE SAVED TO: {output_path}")
-        print(f"========================")
-        
-        # Create metadata
-        metadata = {
-            "generated_image_path": output_path,
-            "original_filename": filename,
-            "caption_used": prompt,
-            "generation_time": generation_time,
-            "guidance_scale": 3.5,
-            "num_steps": num_inference_steps,
-        }
-        print(f"Image generation completed in {generation_time:.2f} seconds")
-        
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        generation_time = -1  # Indicate failure
-
-    # Stop the monitoring thread
-    stop_monitoring.set()
-    monitor_thread.join()
-    torch.cuda.empty_cache()  # Free memory again after generation
-
-    # Analyze the collected VRAM data
-    if vram_samples:
-        avg_vram = sum(vram_samples) / len(vram_samples)
-        peak_vram = max(vram_samples)
-
-        print(f"\n--- VRAM Usage Statistics ---")
-        print(f"Average VRAM used: {avg_vram:.2f} GB")
-        print(f"Peak VRAM used: {peak_vram:.2f} GB")
-        metadata["average_vram_gb"] = avg_vram
-        metadata["peak_vram_gb"] = peak_vram
-    else:
-        print("No VRAM data was collected.")
-        metadata["average_vram_gb"] = None
-        metadata["peak_vram_gb"] = None
-
-    return generation_time, metadata  # Return both generation time and metadata
-
 def main():
     # Setup argument parser
     parser = argparse.ArgumentParser(description="Combined quantization and pruning with COCO dataset")
@@ -478,7 +324,7 @@ def main():
     setup_memory_optimizations()
     
     # Create output directories
-    output_dir = "pruning/combined_quant_pruning_outputs"
+    output_dir = "pruning/quant_pruning_outputs"
     os.makedirs(output_dir, exist_ok=True)
     
     # Define COCO paths
@@ -582,7 +428,7 @@ def main():
             print(f"Image available at: {output_path}")
             print(f"{'='*80}\n")
         except Exception as e:
-            print(f"Error generating image for prompt '{prompt[:50]}...': {e}")
+            print(f"Error when generating image for prompt '{prompt[:50]}...': {e}")
             generation_times[filename] = -1  # Indicate an error
             
         # Force GC to free memory
