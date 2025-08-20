@@ -1,9 +1,21 @@
 {
     "optimization": {
-        "apply_pruning": false,
-        "apply_quantization": false
+        "apply_pruning": true,
+        "apply_quantization": true,
+        "is_optimization_enabled": true
     },
-    "is_optimization_enabled": false,
+    "optimization_params": {
+        "pruning_amount": 0.3,
+        "pruning_method": "magnitude",
+        "bits": 4,
+        "quant_method": "dynamic",
+        "precision": "int4",
+        "num_images": 1,
+        "steps": 25,
+        "guidance_scale": 7.5,
+        "skip_metrics": false,
+        "metrics_subset": 100
+    },
     "models": {
         "Flux.1-schnell": {
             "path": "black-forest-labs/FLUX.1-schnell",

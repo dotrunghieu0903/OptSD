@@ -19,6 +19,13 @@ from metrics import calculate_clip_score, calculate_fid, calculate_lpips, calcul
 from nunchaku import NunchakuFluxTransformer2dModel
 from nunchaku.utils import get_precision
 # Import preprocessing from current directory since we're already in the quantization module
+# Use explicit import path to make sure it works both when imported and when run directly
+import os
+import sys
+# Get the absolute path to the quantization directory
+quantization_dir = os.path.dirname(os.path.abspath(__file__))
+if quantization_dir not in sys.path:
+    sys.path.append(quantization_dir)
 from preprocessing import preprocessing_coco
 from resizing_image import resize_images
 from shared.resources_monitor import generate_image_and_monitor, write_generation_metadata_to_file
@@ -69,22 +76,29 @@ def get_model_size(model):
     return model_size_mb
 
 
-def main():
-    # Setup argument parser
-    parser = argparse.ArgumentParser(description="Quantization with COCO dataset")
-    parser.add_argument("--precision", type=str, default=None, 
-                        help="Precision to use (default is auto-detected)")
-    parser.add_argument("--num_images", type=int, default=500,
-                        help="Number of COCO images to process")
-    parser.add_argument("--steps", type=int, default=30,
-                        help="Number of inference steps")
-    parser.add_argument("--guidance_scale", type=float, default=3.5,
-                        help="Guidance scale for image generation")
-    parser.add_argument("--skip_metrics", action="store_true",
-                        help="Skip calculation of image quality metrics")
-    parser.add_argument("--metrics_subset", type=int, default=100,
-                        help="Number of images to use for metrics calculation (default: 100)")
-    args = parser.parse_args()
+def main(args=None):
+    # Setup argument parser if args not provided
+    if args is None:
+        parser = argparse.ArgumentParser(description="Quantization with COCO dataset")
+        # parser.add_argument("--bits", type=int, default=8, 
+        #                     choices=[8, 4, 2],
+        #                     help="Bit precision for quantization")
+        parser.add_argument("--quant_method", type=str, default="dynamic", 
+                            choices=["static", "dynamic", "aware_training"],
+                            help="Quantization method to use")
+        parser.add_argument("--precision", type=str, default=None, 
+                            help="Precision to use (default is auto-detected)")
+        parser.add_argument("--num_images", type=int, default=500,
+                            help="Number of COCO images to process")
+        parser.add_argument("--steps", type=int, default=30,
+                            help="Number of inference steps")
+        parser.add_argument("--guidance_scale", type=float, default=3.5,
+                            help="Guidance scale for image generation")
+        parser.add_argument("--skip_metrics", action="store_true",
+                            help="Skip calculation of image quality metrics")
+        parser.add_argument("--metrics_subset", type=int, default=100,
+                            help="Number of images to use for metrics calculation (default: 100)")
+        args = parser.parse_args()
     
     # Apply memory optimizations
     setup_memory_optimizations()

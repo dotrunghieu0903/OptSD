@@ -8,9 +8,7 @@ import os
 import sys
 import gc
 import json
-import random
 import argparse
-import itertools
 from tqdm import tqdm
 from PIL import Image
 
@@ -21,36 +19,24 @@ from metrics import calculate_fid, compute_image_reward, calculate_clip_score, c
 from resizing_image import resize_images
 
 # Import from pruning module
-from pruning import get_model_size, get_sparsity, apply_magnitude_pruning
+try:
+    # First try relative import for the pruning module in this directory
+    from .pruning import get_model_size, get_sparsity, apply_magnitude_pruning
+except ImportError:
+    # Fall back to direct import if running as script
+    from pruning import get_model_size, get_sparsity, apply_magnitude_pruning
 
 import torch
 from huggingface_hub import login
 from diffusers import FluxPipeline
 from nunchaku import NunchakuFluxTransformer2dModel
 from nunchaku.utils import get_precision
-
-import os
-import gc
-import argparse
-import json
-from tqdm import tqdm
-import sys
-from PIL import Image
 
 # Add parent directory to path for importing modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.resources_monitor import generate_image_and_monitor
 from metrics import calculate_fid, compute_image_reward, calculate_clip_score, calculate_lpips, calculate_psnr_resized
 from resizing_image import resize_images
-
-import torch
-import torch.nn as nn
-import torch.nn.utils.prune as prune
-
-from huggingface_hub import login
-from diffusers import FluxPipeline
-from nunchaku import NunchakuFluxTransformer2dModel
-from nunchaku.utils import get_precision
 
 # Configure PyTorch memory management
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -105,7 +91,7 @@ def load_model(precision=None):
     Load the diffusion model with the specified precision.
     
     Args:
-        precision: The precision to use (fp4, fp8, etc.). If None, will use auto-detected.
+        precision: The precision to use (int4, int8, etc.). If None, will use auto-detected.
         
     Returns:
         The loaded transformer model and precision used
@@ -113,12 +99,31 @@ def load_model(precision=None):
     if precision is None:
         # Auto-detect precision
         precision = get_precision()
-        print(f"Detected precision: {precision}")
-
-    # Load the quantized transformer model - use int4 for best quantization
-    print(f"Loading model with int4 quantization...")
-    model_path = "mit-han-lab/svdq-int4-flux.1-dev"
-    transformer = NunchakuFluxTransformer2dModel.from_pretrained(model_path, offload=True)
+        print(f"Auto-detected precision: {precision}")
+    
+    # Default to int4 if precision is still None
+    if precision is None:
+        precision = "int4"
+    
+    # Make sure precision is a string without extra whitespace
+    if isinstance(precision, str):
+        precision = precision.strip()
+    
+    print(f"Loading model with {precision} quantization...")
+    
+    # Construct model path based on precision
+    model_path = f"mit-han-lab/svdq-{precision}-flux.1-dev"
+    
+    try:
+        transformer = NunchakuFluxTransformer2dModel.from_pretrained(model_path, offload=True)
+    except Exception as e:
+        print(f"Error loading model with precision {precision}: {e}")
+        print("Falling back to int4 precision...")
+        model_path = "mit-han-lab/svdq-int4-flux.1-dev"
+        transformer = NunchakuFluxTransformer2dModel.from_pretrained(model_path, offload=True)
+        precision = "int4"
+    
+    return transformer, precision
     
     return transformer, precision
 
@@ -296,24 +301,36 @@ def load_coco_captions(annotations_file, limit=500):
     
     return image_filename_to_caption, image_dimensions
 
-def main():
-    # Setup argument parser
-    parser = argparse.ArgumentParser(description="Combined quantization and pruning with COCO dataset")
-    parser.add_argument("--pruning_amount", type=float, default=0.3, 
-                        help="Amount of weights to prune (0.0 to 0.9)")
-    parser.add_argument("--precision", type=str, default=None, 
-                        help="Precision to use (default is auto-detected)")
-    parser.add_argument("--num_images", type=int, default=500,
-                        help="Number of COCO images to process")
-    parser.add_argument("--steps", type=int, default=30,
-                        help="Number of inference steps")
-    parser.add_argument("--guidance_scale", type=float, default=3.5,
-                        help="Guidance scale for image generation")
-    parser.add_argument("--skip_metrics", action="store_true",
-                        help="Skip calculation of image quality metrics")
-    parser.add_argument("--metrics_subset", type=int, default=100,
-                        help="Number of images to use for metrics calculation (default: 100)")
-    args = parser.parse_args()
+def main(args=None):
+    # If no args provided, parse them from command line
+    if args is None:
+        # Setup argument parser
+        parser = argparse.ArgumentParser(description="Combined Pruning and Quantization with COCO dataset")
+        parser.add_argument("--pruning_amount", type=float, default=0.3, 
+                            help="Amount of weights to prune (0.0 to 0.9)")
+        parser.add_argument("--pruning_method", type=str, default="magnitude", 
+                            choices=["magnitude", "structured", "iterative", "attention_heads"],
+                            help="Pruning method to use")
+        # parser.add_argument("--bits", type=int, default=8, 
+        #                     choices=[8, 4, 2],
+        #                     help="Bit precision for quantization")
+        parser.add_argument("--quant_method", type=str, default="dynamic", 
+                            choices=["static", "dynamic", "aware_training"],
+                            help="Quantization method to use")
+        parser.add_argument("--precision", type=str, default="int4", 
+                            choices=["int8", "int4", "int2"],
+                            help="Precision to use for quantization")
+        parser.add_argument("--num_images", type=int, default=500,
+                            help="Number of COCO images to process")
+        parser.add_argument("--steps", type=int, default=30,
+                            help="Number of inference steps")
+        parser.add_argument("--guidance_scale", type=float, default=3.5,
+                            help="Guidance scale for image generation")
+        parser.add_argument("--skip_metrics", action="store_true",
+                            help="Skip calculation of image quality metrics")
+        parser.add_argument("--metrics_subset", type=int, default=100,
+                            help="Number of images to use for metrics calculation (default: 100)")
+        args = parser.parse_args()
     
     # Setup memory optimizations to avoid CUDA OOM errors
     setup_memory_optimizations()
@@ -335,7 +352,9 @@ def main():
     # 2. Load the model with quantization
     print("\n=== Loading Quantized Model ===")
     try:
-        transformer, precision = load_model(args.precision)
+        # Check if precision is available in args
+        precision_param = getattr(args, 'precision', None)
+        transformer, precision = load_model(precision_param)
         quantized_size = get_model_size(transformer)
         print(f"Quantized model size: {quantized_size:.2f} MB")
     except Exception as e:

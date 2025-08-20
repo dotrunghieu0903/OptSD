@@ -247,25 +247,27 @@ def load_coco_captions(annotations_file, limit=500):
     
     return image_filename_to_caption, image_dimensions
 
-def main():
-    # Setup argument parser
-    parser = argparse.ArgumentParser(description="Pruning evaluation with COCO dataset")
-    parser.add_argument("--pruning_amount", type=float, default=0.3, 
-                        help="Amount of weights to prune (0.0 to 0.9)")
-    parser.add_argument("--pruning_method", type=str, default="magnitude", 
-                        choices=["magnitude", "structured", "iterative", "attention_heads"],
-                        help="Pruning method to use")
-    parser.add_argument("--num_images", type=int, default=500,
-                        help="Number of COCO images to process")
-    parser.add_argument("--steps", type=int, default=30,
-                        help="Number of inference steps")
-    parser.add_argument("--guidance_scale", type=float, default=3.5,
-                        help="Guidance scale for image generation")
-    parser.add_argument("--skip_metrics", action="store_true",
-                        help="Skip calculation of image quality metrics")
-    parser.add_argument("--metrics_subset", type=int, default=100,
-                        help="Number of images to use for metrics calculation (default: 100)")
-    args = parser.parse_args()
+def main(args=None):
+    # If no args provided, parse them from command line
+    if args is None:
+        # Setup argument parser
+        parser = argparse.ArgumentParser(description="Pruning evaluation with COCO dataset")
+        parser.add_argument("--pruning_amount", type=float, default=0.3, 
+                            help="Amount of weights to prune (0.0 to 0.9)")
+        parser.add_argument("--pruning_method", type=str, default="magnitude", 
+                            choices=["magnitude", "structured", "iterative", "attention_heads"],
+                            help="Pruning method to use")
+        parser.add_argument("--num_images", type=int, default=500,
+                            help="Number of COCO images to process")
+        parser.add_argument("--steps", type=int, default=30,
+                            help="Number of inference steps")
+        parser.add_argument("--guidance_scale", type=float, default=3.5,
+                            help="Guidance scale for image generation")
+        parser.add_argument("--skip_metrics", action="store_true",
+                            help="Skip calculation of image quality metrics")
+        parser.add_argument("--metrics_subset", type=int, default=100,
+                            help="Number of images to use for metrics calculation (default: 100)")
+        args = parser.parse_args()
     
     # Setup memory optimizations to avoid CUDA OOM errors
     setup_memory_optimizations()
