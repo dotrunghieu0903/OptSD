@@ -10,7 +10,7 @@ import lpips
 import torchvision.transforms as transforms
 from transformers import CLIPProcessor, CLIPModel
 
-def calculate_fid(generated_image_dir, resized_generated_image_dir, val2017_dir):
+def calculate_fid_coco(generated_image_dir, resized_generated_image_dir, val2017_dir):
     """
     Calculate the FID score between the generated images and the COCO validation set.
     """
@@ -42,6 +42,29 @@ def calculate_fid(generated_image_dir, resized_generated_image_dir, val2017_dir)
     except Exception as e:
         print(f"Error when calculating FID: {e}")
         return None
+
+def calculate_fid_flickr(output_dir, resized_generated_image_dir, original_flickr_dir):
+    # Create a directory to save generated images
+    print(f"Created directory for generated images: {output_dir}")
+    print(f"Created directory for resized generated images: {resized_generated_image_dir}")
+    print(f"Calculating FID between Flickr dataset: {original_flickr_dir}, Generated Image: {output_dir}")
+
+    # Make sure the directories exist and contain images before calculating FID
+    if not os.path.exists(original_flickr_dir) or not os.listdir(original_flickr_dir):
+        print(f"Error: Real image directory not found or empty: {original_flickr_dir}")
+    elif not os.path.exists(output_dir) or not os.listdir(output_dir):
+        print(f"Error: Generated image directory not found or empty: {output_dir}")
+    else:
+        try:
+            score_fid = fid.compute_fid(original_flickr_dir,
+                                        resized_generated_image_dir,
+                                        mode="clean", # Use the 'clean' mode for the official cleanfid scores
+                                        num_workers=8, # Adjust based on your CPU cores
+                                        batch_size=256) # Adjust based on your GPU memory
+
+            print(f"FID Score: {score_fid:.2f}")
+        except Exception as e:
+            print(f"Error when calculating FID: {e}")
 
 # Calculate Image Reward
 def compute_image_reward(generated_dirpath, captions_dict):

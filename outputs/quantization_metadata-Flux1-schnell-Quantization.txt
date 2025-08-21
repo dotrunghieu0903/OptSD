@@ -1,0 +1,18 @@
+=== Quantization Summary ===
+
+Processed 500 COCO captions
+Inference steps: 25
+Guidance scale: 7.5
+Quantization: int4
+Model size: 102.80 MB
+Successfully generated 500/500 images
+Average generation time: 20.74 seconds per image
+Total generation time: 10367.77 seconds
+Average VRAM usage across all 500 images: 7.79 GB
+
+=== Image Quality Metrics ===
+FID_SCORE: 110.4479
+CLIP_SCORE: 31.5864
+IMAGE_REWARD: 0.8612
+LPIPS: 0.6727
+PSNR: 8.4578
