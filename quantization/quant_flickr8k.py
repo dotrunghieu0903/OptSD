@@ -11,7 +11,7 @@ from diffusers import FluxPipeline
 from huggingface_hub import login
 # Fix import paths to be relative to the project root
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from metrics import calculate_clip_score, calculate_fid_flickr, calculate_lpips, calculate_psnr_resized, compute_image_reward
+from metrics import calculate_clip_score, calculate_fid, calculate_lpips, calculate_psnr_resized, compute_image_reward
 from nunchaku import NunchakuFluxTransformer2dModel
 from nunchaku.utils import get_precision
 # Import preprocessing from current directory since we're already in the quantization module
@@ -95,7 +95,6 @@ def main(args=None):
     # Process Flickr8k dataset
     print("\n=== Loading Flickr8k Captions ===")
     flickr_images_dir = "./flickr8k/Images"
-    flickr_captions_path = "./flickr8k/captions.txt"
 
     # Process Flickr8k dataset
     print(f"Processing Flickr8k dataset")
@@ -106,11 +105,11 @@ def main(args=None):
     print(f"Loaded {len(captions)} captions from Flickr8k dataset")
 
     # Create output directories
-    output_dir = "quantization/quant_outputs/flickr8k"
-    os.makedirs(output_dir, exist_ok=True)
-    print(f"Created directory for generated images: {output_dir}")
+    generation_output_dir = "quantization/quant_outputs/flickr8k"
+    os.makedirs(generation_output_dir, exist_ok=True)
+    print(f"Created directory for generated images: {generation_output_dir}")
 
-    resized_output_dir = os.path.join(output_dir, "resized")
+    resized_output_dir = os.path.join(generation_output_dir, "resized")
     os.makedirs(resized_output_dir, exist_ok=True)
     print(f"Created directory for resized generated images: {resized_output_dir}")
 
@@ -172,7 +171,7 @@ def main(args=None):
     generation_times = {}
     
     for i, (filename, prompt) in enumerate(tqdm(list(captions.items())[:num_images_to_generate], desc="Generating images")):
-        output_path = os.path.join(output_dir, filename)
+        output_path = os.path.join(generation_output_dir, filename)
         
         print(f"\n\n{'='*80}")
         print(f"Processing image {i+1}/{num_images_to_generate}: {filename} (Prompt: {prompt[:50]}...)")
@@ -209,7 +208,7 @@ def main(args=None):
     print("Image generation complete.")
 
     # Save generation metadata
-    metadata_file = os.path.join(output_dir, "Flickr8k_quantization_metadata.json")
+    metadata_file = os.path.join(generation_output_dir, "Flickr8k_quantization_metadata.json")
     write_generation_metadata_to_file(metadata_file)
 
     # Calculate and print average generation time
@@ -222,7 +221,7 @@ def main(args=None):
     # Resize images for comparison
     try:
         print("\n=== Resizing Images ===")
-        resize_images(output_dir, resized_output_dir, image_dimensions)
+        resize_images(generation_output_dir, resized_output_dir, image_dimensions)
         print("Image resizing complete.")
     except Exception as e:
         print(f"Error resizing images: {e}")
@@ -233,27 +232,32 @@ def main(args=None):
     else:
         print("\n=== Calculating Image Quality Metrics ===")
     
+    if not args.skip_metrics:
+        # Create directory for resized images (needed for FID and PSNR)
+        resized_original_dir = os.path.join(generation_output_dir, "resized_original_flickr8k")
+        os.makedirs(resized_original_dir, exist_ok=True)
+
+        # Calculate FID score
+        try:
+            print("\n--- Calculating FID Score ---")
+            # Use Flickr8k original images directory for FID calculation
+            fid_score = calculate_fid(generation_output_dir, resized_output_dir, flickr_images_dir)
+            metrics_results["fid_score"] = fid_score
+        except Exception as e:
+            print(f"Error calculating FID: {e}")
+
         # Calculate CLIP Score
         try:
             print("\n--- Calculating CLIP Score ---")
-            clip_score = calculate_clip_score(output_dir, captions)
+            clip_score = calculate_clip_score(generation_output_dir, captions)
             metrics_results["clip_score"] = clip_score
         except Exception as e:
             print(f"Error calculating CLIP Score: {e}")
-        
-        # Calculate FID score
-        # try:
-        #     print("\n--- Calculating FID Score ---")
-        #     # Use Flickr8k original images directory for FID calculation
-        #     fid_score = calculate_fid_flickr(output_dir, resized_output_dir, flickr_images_dir)
-        #     metrics_results["fid_score"] = fid_score
-        # except Exception as e:
-        #     print(f"Error calculating FID: {e}")
 
         # Calculate ImageReward
         try:
             print("\n--- Calculating ImageReward ---")
-            image_reward = compute_image_reward(output_dir, captions)
+            image_reward = compute_image_reward(generation_output_dir, captions)
             metrics_results["image_reward"] = image_reward
         except Exception as e:
             print(f"Error calculating ImageReward: {e}")
@@ -263,10 +267,6 @@ def main(args=None):
             print("\n--- Calculating LPIPS ---")
             # We need to select a subset of filenames for LPIPS calculation
             # We should compare resized images to ensure dimensions match
-            
-            # Create directory for resized original images (needed for LPIPS and PSNR)
-            resized_original_dir = os.path.join(output_dir, "resized_original")
-            os.makedirs(resized_original_dir, exist_ok=True)
             
             # Get list of generated filenames that have been resized
             generated_filenames = [f for f in os.listdir(resized_output_dir) 
@@ -335,7 +335,7 @@ def main(args=None):
             print(f"Average VRAM usage across all {len(all_vram_data)} images: {overall_avg_vram:.2f} GB")
     
     # Save summary report
-    summary_file = os.path.join(output_dir, "Flickr8k_quantization_summary.txt")
+    summary_file = os.path.join(generation_output_dir, "Flickr8k_quantization_summary.txt")
     with open(summary_file, "w", encoding="utf-8") as f:
         f.write("=== Flickr8k Quantization Summary ===\n\n")
         f.write(f"Processed {num_images_to_generate} Flickr8k captions\n")
@@ -359,7 +359,7 @@ def main(args=None):
             for metric_name, metric_value in metrics_results.items():
                 f.write(f"- {metric_name}: {metric_value:.4f}\n")
     
-    print(f"Completed. Results saved to {output_dir}")
+    print(f"Completed. Results saved to {generation_output_dir}")
     print(f"Summary report: {summary_file}")
 
 

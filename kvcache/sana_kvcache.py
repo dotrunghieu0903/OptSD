@@ -64,75 +64,96 @@ class KVCacheUNet(UNet2DConditionModel):
                     module.processor.forward = self._make_kv_cached_cross_attn_forward(module.processor)
     
     def _make_kv_cached_attn_forward(self, processor):
-        """Create a cached forward function for self-attention"""
+        """Create a cached forward function for self-attention following the step-by-step process:
+        1. First Generation: Calculate and store initial KV values
+        2. Next Words: Retrieve and add new values to cached KV
+        3. Efficient Attention: Calculate attention using cached K and V with new Q
+        4. Update Input: Add newly generated token and continue
+        """
         def cached_forward(attn, hidden_states, encoder_hidden_states=None, attention_mask=None, temb=None, **kwargs):
             cache_key = f"{processor.name}_{kwargs.get('timestep', 0)}"
+            is_first_generation = not bool(self.kv_cache)
             
-            if cache_key in self.kv_cache and kwargs.get('use_cache', False):
-                # Use cached KV
-                key, value = self.kv_cache[cache_key]
-                
-                # We still need to compute query
+            if is_first_generation or not kwargs.get('use_cache', False):
+                # Step 1: First Generation - Calculate and store initial KV values
+                key = attn.to_k(hidden_states)
+                value = attn.to_v(hidden_states)
                 query = attn.to_q(hidden_states)
                 
-                # Process query with cached key, value
-                attn_output = self._compute_attention(
-                    attn, query, key, value, attention_mask, kwargs.get('scale', 1.0)
-                )
-                
-                return attn_output
-            else:
-                # Compute original forward pass
-                output = processor.original_forward(
-                    attn, hidden_states, encoder_hidden_states, attention_mask, temb, **kwargs
-                )
-                
-                # Cache KV if requested
+                # Store KV values in cache if requested
                 if kwargs.get('use_cache', False):
-                    # Cache key and value
-                    key = attn.to_k(hidden_states)
-                    value = attn.to_v(hidden_states)
                     self.kv_cache[cache_key] = (key, value)
+            else:
+                # Step 2: Next Words - Retrieve stored KV values
+                cached_key, cached_value = self.kv_cache[cache_key]
                 
-                return output
+                # Calculate new KV values for the current token
+                new_key = attn.to_k(hidden_states)
+                new_value = attn.to_v(hidden_states)
+                
+                # Concatenate with cached values
+                key = torch.cat([cached_key, new_key], dim=1)
+                value = torch.cat([cached_value, new_value], dim=1)
+                
+                # Update cache with new concatenated values
+                self.kv_cache[cache_key] = (key, value)
+                
+                # Step 3: Calculate query for efficient attention
+                query = attn.to_q(hidden_states)
+            
+            # Step 3: Efficient Attention Computation
+            attn_output = self._compute_attention(
+                attn, query, key, value, attention_mask, kwargs.get('scale', 1.0)
+            )
+            
+            # Step 4: Input is automatically updated by the pipeline for next iteration
+            return attn_output
         
         return cached_forward
     
     def _make_kv_cached_cross_attn_forward(self, processor):
-        """Create a cached forward function for cross-attention"""
+        """Create a cached forward function for cross-attention following the step-by-step process:
+        1. First Generation: Calculate and store initial KV values
+        2. Next Words: Retrieve and add new values to cached KV
+        3. Efficient Attention: Calculate attention using cached K and V with new Q
+        4. Update Input: Add newly generated token and continue
+        """
         def cached_forward(attn, hidden_states, encoder_hidden_states=None, attention_mask=None, temb=None, **kwargs):
             # For cross attention, we cache based on the combination of timestep and text embedding
-            # Use a hash of the encoder_hidden_states to identify the text embedding
             enc_hash = str(hash(str(encoder_hidden_states.sum().item())))
             cache_key = f"{processor.name}_{kwargs.get('timestep', 0)}_{enc_hash}"
+            is_first_generation = not bool(self.kv_cache)
             
-            if cache_key in self.kv_cache and kwargs.get('use_cache', False):
-                # Use cached KV
-                key, value = self.kv_cache[cache_key]
-                
-                # We still need to compute query
-                query = attn.to_q(hidden_states)
-                
-                # Process query with cached key, value
-                attn_output = self._compute_attention(
-                    attn, query, key, value, attention_mask, kwargs.get('scale', 1.0)
-                )
-                
-                return attn_output
-            else:
-                # Compute original forward pass
-                output = processor.original_forward(
-                    attn, hidden_states, encoder_hidden_states, attention_mask, temb, **kwargs
-                )
-                
-                # Cache KV if requested
-                if kwargs.get('use_cache', False) and encoder_hidden_states is not None:
-                    # Cache key and value
+            if is_first_generation or not kwargs.get('use_cache', False):
+                # Step 1: First Generation - Calculate and store initial KV values
+                if encoder_hidden_states is not None:
                     key = attn.to_k(encoder_hidden_states)
                     value = attn.to_v(encoder_hidden_states)
-                    self.kv_cache[cache_key] = (key, value)
+                    query = attn.to_q(hidden_states)
+                    
+                    # Store KV values in cache if requested
+                    if kwargs.get('use_cache', False):
+                        self.kv_cache[cache_key] = (key, value)
+                else:
+                    # Fall back to original processing if no encoder states
+                    return processor.original_forward(
+                        attn, hidden_states, encoder_hidden_states, attention_mask, temb, **kwargs
+                    )
+            else:
+                # Step 2: Next Words - Retrieve stored KV values
+                # For cross attention, we reuse the cached values as they're based on the constant encoder hidden states
+                key, value = self.kv_cache[cache_key]
                 
-                return output
+                # Step 3: Calculate new query for current token
+                query = attn.to_q(hidden_states)
+            
+            # Step 3: Efficient Attention Computation
+            attn_output = self._compute_attention(
+                attn, query, key, value, attention_mask, kwargs.get('scale', 1.0)
+            )
+            
+            # Step 4: Input is automatically updated by the pipeline for next iteration
+            return attn_output
         
         return cached_forward
     

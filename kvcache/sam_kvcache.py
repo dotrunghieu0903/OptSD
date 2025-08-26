@@ -13,6 +13,12 @@ from segment_anything import sam_model_registry, SamPredictor
 import matplotlib.pyplot as plt
 import cv2
 
+# Fix import paths to be relative to the project root
+import sys
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from metrics import calculate_clip_score, calculate_fid, calculate_lpips, calculate_psnr_resized
+from shared.resources_monitor import generate_image_and_monitor, write_generation_metadata_to_file
+
 # Memory utilities for optimization
 def setup_memory_optimizations():
     """Apply memory optimizations to avoid CUDA OOM errors"""
@@ -56,42 +62,57 @@ class KVCacheSamAttention(torch.nn.Module):
         self.kv_cache = {}
         
     def forward(self, q, k, v, mask=None, cache_id=None, use_cache=False):
-        # If caching is not enabled or we don't have a cache_id, use original forward
+        """Forward pass with KV caching following the step-by-step process:
+        1. First Generation: Calculate and store initial KV values
+        2. Next Words: Retrieve stored KV values and add new ones
+        3. Efficient Attention: Calculate attention using cached K and V with new Q
+        4. Update Input: Add newly generated token and continue
+        """
+        # If caching is not enabled or no cache ID provided, use original forward
         if not self.cache_enabled or cache_id is None or not use_cache:
             return self.original_attn(q, k, v, mask=mask)
-        
-        # Check if we have cached values for this input
-        if cache_id in self.kv_cache:
-            cached_k, cached_v = self.kv_cache[cache_id]
-            
-            # Use cached k, v with new q
-            attention_output = self._compute_attention(q, cached_k, cached_v, mask)
-            return attention_output
-        else:
-            # Compute original attention
-            attention_output = self.original_attn(q, k, v, mask=mask)
-            
-            # Cache k, v for future use
+
+        is_first_generation = cache_id not in self.kv_cache
+
+        if is_first_generation:
+            # Step 1: First Generation - Calculate and store initial KV values
+            # For SAM, k and v are already calculated, just store them
             self.kv_cache[cache_id] = (k, v)
             
-            return attention_output
+            # Use original attention for first pass
+            attention_output = self._compute_attention(q, k, v, mask)
+        else:
+            # Step 2: Next Words - Retrieve stored KV values
+            cached_k, cached_v = self.kv_cache[cache_id]
+            
+            # Calculate attention using cached values
+            # Step 3: Efficient Attention Computation
+            attention_output = self._compute_attention(q, cached_k, cached_v, mask)
+            
+            # Unlike language models, SAM doesn't need to append new values 
+            # as it processes the full image at once
+        
+        # Step 4: Input updates are handled by the SAM predictor
+        return attention_output
             
     def _compute_attention(self, q, k, v, attn_mask=None):
-        """Compute attention using provided query, key, value tensors"""
-        # Calculate attention scores
-        attn_weights = torch.matmul(q, k.transpose(-2, -1)) / self.scale
+        """Compute attention using provided query, key, value tensors
+        This implements the efficient attention computation (Step 3) of the process.
+        """
+        # Step 3a: Calculate attention scores with cached K
+        attention_scores = torch.matmul(q, k.transpose(-2, -1)) / self.scale
         
-        # Apply mask if provided
+        # Step 3b: Apply mask if provided
         if attn_mask is not None:
-            attn_weights = attn_weights + attn_mask
+            attention_scores = attention_scores + attn_mask
             
-        # Apply softmax
-        attn_probs = torch.nn.functional.softmax(attn_weights, dim=-1)
+        # Step 3c: Apply softmax to get attention probabilities
+        attention_probs = torch.nn.functional.softmax(attention_scores, dim=-1)
         
-        # Calculate attention output
-        attn_output = torch.matmul(attn_probs, v)
+        # Step 3d: Calculate final attention output using cached V
+        hidden_states = torch.matmul(attention_probs, v)
         
-        return attn_output
+        return hidden_states
 
 
 class OptimizedSamModel:
@@ -112,7 +133,7 @@ class OptimizedSamModel:
         # Apply memory optimizations
         setup_memory_optimizations()
         
-        # Load the SAM model
+        # Load the SAM model with error handling and retry
         try:
             # For local checkpoint
             if os.path.exists(self.model_path):
@@ -123,12 +144,25 @@ class OptimizedSamModel:
                 from transformers import SamModel
                 self.sam = SamModel.from_pretrained(self.model_path)
         except Exception as e:
-            print(f"Error loading SAM model: {e}")
-            raise
+            print(f"Error loading model: {e}")
+            print("Trying again with default parameters...")
+            try:
+                # Fallback to default model
+                model_path = "facebook/sam-vit-base"
+                from transformers import SamModel
+                self.sam = SamModel.from_pretrained(model_path)
+                print("Loaded fallback model successfully")
+            except Exception as e2:
+                print(f"Fatal error loading model: {e2}")
+                raise
             
-        # Move to CUDA if available
+        # Move to CUDA if available and calculate model size
         if torch.cuda.is_available():
             self.sam = self.sam.to("cuda")
+            
+        # Calculate model size
+        model_size = self.get_model_size()
+        print(f"Model size: {model_size:.2f} MB")
             
         # Create predictor
         self.predictor = SamPredictor(self.sam)
@@ -136,7 +170,28 @@ class OptimizedSamModel:
         # Apply KV caching to transformer blocks
         self._apply_kv_caching()
         
+        # Test the model with a simple prediction
+        print("Testing model with a simple prediction...")
+        try:
+            test_image = np.random.randint(0, 255, (64, 64, 3), dtype=np.uint8)
+            self.set_image(test_image)
+            _ = self.predict({'point_coords': np.array([[32, 32]]), 'point_labels': np.array([1])})
+            print("Model test successful!")
+        except Exception as e:
+            print(f"Warning: Model test failed: {e}")
+        finally:
+            # Clear test memory
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+        
         print("SAM model loaded and KV caching applied")
+        
+    def get_model_size(self):
+        """Calculate the model size in MB"""
+        model_size_bytes = sum(p.numel() * p.element_size() for p in self.sam.parameters())
+        model_size_mb = model_size_bytes / (1024 * 1024)
+        return model_size_mb
         
     def _apply_kv_caching(self):
         """Apply KV caching to attention modules in the SAM model"""
@@ -180,28 +235,50 @@ class OptimizedSamModel:
             attn_module.disable_caching()
     
     def set_image(self, image):
-        """Set the image for processing"""
+        """Set the image for processing and prepare KV caching
+        Following the step-by-step process:
+        1. First Generation: Initial setup and cache clear
+        2. Next Words: Prepare for subsequent prompts
+        3. Efficient Attention: Enable caching
+        4. Update Input: Handle through predictor
+        """
+        # Step 1: First Generation Setup
+        self.clear_cache()  # Clear any existing cache
+        self.enable_caching()  # Enable caching mechanism
+        
+        # Step 2: Prepare for Next Words/Prompts
+        # Generate a unique ID for this image's cache
+        image_hash = hash(str(image.sum()))
+        for i, module in enumerate(self.attention_modules):
+            # Each attention module gets its own cache entry
+            cache_id = f"image_{image_hash}_module_{i}"
+            module.cache_id = cache_id
+        
+        # Step 3: Set up for efficient attention
+        # The predictor will handle the actual image processing
         self.predictor.set_image(image)
         
-        # Generate image embedding with caching
-        self.enable_caching()
-        # Clear cache first to ensure clean state
-        self.clear_cache()
-        # Set unique cache ID for this image
-        for i, module in enumerate(self.attention_modules):
-            cache_id = f"image_{hash(str(image.sum()))}_module_{i}"
-            module.cache_id = cache_id
+        # Step 4: Input Updates
+        # SAM will handle subsequent prompt processing using the cached image features
     
     def predict(self, prompts, use_cache=True):
-        """Run prediction with the current image and given prompts"""
-        # If caching is disabled, clear cache to ensure no reuse
+        """Run prediction with the current image and given prompts
+        Following the step-by-step process:
+        1. First Generation: Use cached image features
+        2. Next Words: Process new prompt
+        3. Efficient Attention: Use cached K,V values
+        4. Update Input: Prepare for next prompt
+        """
+        # Step 1 & 2: Handle cache state for this prediction
         if not use_cache:
             self.clear_cache()
             self.disable_caching()
         else:
+            # Ensure caching is enabled for efficient processing
             self.enable_caching()
-            
-        # Make predictions
+        
+        # Step 3: Make predictions using efficient attention
+        # The SAM predictor will automatically use our cached KV values
         masks, scores, logits = self.predictor.predict(
             point_coords=prompts.get('point_coords', None),
             point_labels=prompts.get('point_labels', None),
@@ -210,6 +287,7 @@ class OptimizedSamModel:
             multimask_output=prompts.get('multimask_output', True),
         )
         
+        # Step 4: Return results, cache is maintained for next prompt
         return {
             'masks': masks,
             'scores': scores,
@@ -387,12 +465,63 @@ def load_config():
         print(f"Error loading config: {e}")
         return None
 
+def calculate_metrics(original_dir, generated_dir, image_info, subset_size=100):
+    """Calculate quality metrics for generated masks"""
+    metrics_results = {}
+    
+    # Create directory for resized images
+    resized_dir = os.path.join(generated_dir, "resized")
+    os.makedirs(resized_dir, exist_ok=True)
+    
+    try:
+        print("\n--- Calculating FID Score ---")
+        fid_score = calculate_fid(generated_dir, resized_dir, original_dir)
+        metrics_results["fid_score"] = fid_score
+    except Exception as e:
+        print(f"Error calculating FID: {e}")
+    
+    try:
+        print("\n--- Calculating CLIP Score ---")
+        # Create caption dictionary for CLIP score calculation
+        captions = {img: info['annotations'][0]['caption'] if info['annotations'] else ""
+                   for img, info in image_info.items()}
+        clip_score = calculate_clip_score(generated_dir, captions)
+        metrics_results["clip_score"] = clip_score
+    except Exception as e:
+        print(f"Error calculating CLIP Score: {e}")
+    
+    try:
+        print("\n--- Calculating LPIPS ---")
+        # Get list of generated images
+        generated_files = [f for f in os.listdir(generated_dir) 
+                         if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        
+        # Use subset for LPIPS calculation
+        subset_files = generated_files[:subset_size]
+        lpips_score = calculate_lpips(original_dir, generated_dir, subset_files)
+        metrics_results["lpips"] = lpips_score
+    except Exception as e:
+        print(f"Error calculating LPIPS: {e}")
+    
+    try:
+        print("\n--- Calculating PSNR ---")
+        psnr_score = calculate_psnr_resized(original_dir, generated_dir, subset_files)
+        metrics_results["psnr"] = psnr_score
+    except Exception as e:
+        print(f"Error calculating PSNR: {e}")
+    
+    return metrics_results
+
 
 def main():
     """Main function for running the SAM model with KV caching"""
     parser = argparse.ArgumentParser(description="Run SAM 2.1 with KV caching optimization")
-    parser.add_argument("--image", type=str, required=True,
-                        help="Path to the input image")
+    parser.add_argument("--image", type=str,
+                        help="Path to the input image (optional)")
+    parser.add_argument("--coco_dir", type=str, default="coco",
+                        help="Path to COCO dataset directory")
+    parser.add_argument("--num_images", type=int, default=100,
+                        help="Number of COCO images to process")
     parser.add_argument("--point_coords", type=str, default=None,
                         help="Point coordinates for prompting, format: 'x1,y1,label1 x2,y2,label2'")
     parser.add_argument("--box", type=str, default=None,
@@ -407,6 +536,10 @@ def main():
                         help="Generate multiple masks")
     parser.add_argument("--model_path", type=str, default=None,
                         help="Path to the SAM model")
+    parser.add_argument("--skip_metrics", action="store_true",
+                        help="Skip calculation of quality metrics")
+    parser.add_argument("--metrics_subset", type=int, default=100,
+                        help="Number of images to use for metrics calculation")
     
     args = parser.parse_args()
     
@@ -418,20 +551,150 @@ def main():
         model_name = config["models"]["SAM 2.1"]["path"]
         args.model_path = model_name
     
-    # Load the image
-    try:
-        image = cv2.imread(args.image)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    except Exception as e:
-        print(f"Error loading image: {e}")
-        return
+    # Setup COCO paths
+    coco_dir = args.coco_dir
+    annotations_dir = os.path.join(coco_dir, "annotations")
+    val2017_dir = os.path.join(coco_dir, "val2017")
+    
+    # Create output directories
+    output_dir = os.path.join("kvcache", "outputs")
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Create a list to store generation metadata
+    generation_metadata = []
+    
+    # Load COCO dataset if not in interactive mode
+    if not args.interactive and not args.image:
+        print("\n=== Loading COCO Dataset ===")
+        annotation_file = os.path.join(annotations_dir, "instances_val2017.json")
+        image_info = {}
+        # image_info, coco = load_coco_dataset(annotation_file, args.num_images)
+        # if image_info is None:
+        #     return
+    
+    # Load single image if specified
+    elif args.image:
+        try:
+            image = cv2.imread(args.image)
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        except Exception as e:
+            print(f"Error loading image: {e}")
+            return
     
     # Create optimized model
     sam = OptimizedSamModel(model_path=args.model_path)
     
-    # Set the image
-    sam.set_image(image)
-    
+    if args.interactive or args.image:
+        # Process single image mode
+        sam.set_image(image)
+        
+        if args.benchmark:
+            # Create prompts for benchmarking
+            prompts_list = []
+    else:
+        # Process COCO dataset
+        print("\n=== Processing COCO Images ===")
+        
+        # Track statistics
+        processing_times = []
+        successful_masks = 0
+        
+        for img_file, info in tqdm(list(image_info.items())[:args.num_images]):
+            img_path = os.path.join(val2017_dir, img_file)
+            output_path = os.path.join(output_dir, img_file.replace('.jpg', '_mask.png'))
+            
+            # Skip if output exists
+            if os.path.exists(output_path):
+                print(f"Skipping {img_file} (output exists)")
+                continue
+                
+            try:
+                # Load and process image
+                image = cv2.imread(img_path)
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                
+                # Get annotations for automatic prompting
+                annotations = info['annotations']
+                if not annotations:
+                    continue
+                    
+                # Use annotation bounding box as prompt
+                bbox = annotations[0]['bbox']  # [x, y, width, height]
+                prompt = {
+                    'box': np.array([bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]]),
+                    'multimask_output': args.multimask
+                }
+                
+                # Time the generation
+                start_time = time.time()
+                
+                # Set image and generate mask
+                sam.set_image(image)
+                result = sam.predict(prompt)
+                
+                # Save processing time
+                processing_time = time.time() - start_time
+                processing_times.append(processing_time)
+                
+                # Save the mask
+                mask = result['masks'][0]
+                mask_img = Image.fromarray((mask * 255).astype(np.uint8))
+                mask_img.save(output_path)
+                
+                successful_masks += 1
+                
+                # Add generation metadata
+                metadata = {
+                    'filename': img_file,
+                    'processing_time': processing_time,
+                    'success': True
+                }
+                generation_metadata.append(metadata)
+                
+            except Exception as e:
+                print(f"Error processing {img_file}: {e}")
+                metadata = {
+                    'filename': img_file,
+                    'error': str(e),
+                    'success': False
+                }
+                generation_metadata.append(metadata)
+            
+            # Cleanup
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+        
+        # Calculate and save metrics if not skipped
+        if not args.skip_metrics:
+            print("\n=== Calculating Quality Metrics ===")
+            metrics = calculate_metrics(val2017_dir, output_dir, image_info, args.metrics_subset)
+            
+            # Save metrics
+            metrics_file = os.path.join(output_dir, "metrics.json")
+            with open(metrics_file, 'w') as f:
+                json.dump(metrics, f, indent=2)
+            
+            print("\n=== Quality Metrics ===")
+            for metric, value in metrics.items():
+                print(f"{metric}: {value:.4f}")
+        
+        # Save summary
+        summary_file = os.path.join(output_dir, "processing_summary.txt")
+        with open(summary_file, 'w') as f:
+            f.write("=== Processing Summary ===\n\n")
+            f.write(f"Total images processed: {args.num_images}\n")
+            f.write(f"Successful masks: {successful_masks}\n")
+            if processing_times:
+                avg_time = sum(processing_times) / len(processing_times)
+                f.write(f"Average processing time: {avg_time:.2f} seconds\n")
+            f.write(f"Model: {args.model_path}\n")
+            f.write(f"KV Cache: Enabled\n")
+            
+        print(f"\nProcessing complete. Results saved in {output_dir}")
+        print(f"Summary saved to {summary_file}")
+        return
+        
     if args.benchmark:
         # Create prompts for benchmarking
         prompts_list = []

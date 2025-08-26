@@ -14,7 +14,7 @@ import sys
 import os
 # Add the project root to the path if needed
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from metrics import calculate_clip_score, calculate_fid_coco, calculate_lpips, calculate_psnr_resized, compute_image_reward
+from metrics import calculate_clip_score, calculate_fid, calculate_lpips, calculate_psnr_resized, compute_image_reward
 from nunchaku import NunchakuFluxTransformer2dModel
 from nunchaku.utils import get_precision
 # Import preprocessing from current directory since we're already in the quantization module
@@ -115,11 +115,11 @@ def main(args=None):
     image_filename_to_caption, image_dimensions, image_id_to_dimensions = preprocessing_coco(annotations_dir)
 
     # Create output directories
-    output_dir = "quantization/quant_outputs/coco"
-    os.makedirs(output_dir, exist_ok=True)
-    print(f"Created directory for generated images: {output_dir}")
+    generation_output_dir = "quantization/quant_outputs/coco"
+    os.makedirs(generation_output_dir, exist_ok=True)
+    print(f"Created directory for generated images: {generation_output_dir}")
 
-    resized_output_dir = os.path.join(output_dir, "resized")
+    resized_output_dir = os.path.join(generation_output_dir, "resized")
     os.makedirs(resized_output_dir, exist_ok=True)
     print(f"Created directory for resized generated images: {resized_output_dir}")
 
@@ -184,7 +184,7 @@ def main(args=None):
     generation_times = {}
     
     for i, (filename, prompt) in enumerate(tqdm(list(image_filename_to_caption.items())[:num_images_to_generate], desc="Generating images")):
-        output_path = os.path.join(output_dir, filename)
+        output_path = os.path.join(generation_output_dir, filename)
         
         print(f"\n\n{'='*80}")
         print(f"Processing image {i+1}/{num_images_to_generate}: {filename} (Prompt: {prompt[:50]}...)")
@@ -221,7 +221,7 @@ def main(args=None):
     print("Image generation complete.")
 
     # Save generation metadata
-    metadata_file = os.path.join(output_dir, "coco_quantization_metadata.json")
+    metadata_file = os.path.join(generation_output_dir, "coco_quantization_metadata.json")
     write_generation_metadata_to_file(metadata_file)
 
     # Calculate and print average generation time
@@ -233,7 +233,7 @@ def main(args=None):
     # 3. Resize images for comparison
     try:
         print("\n=== Resizing Images ===")
-        resize_images(output_dir, resized_output_dir, image_dimensions)
+        resize_images(generation_output_dir, resized_output_dir, image_dimensions)
         print("Image resizing complete.")
     except Exception as e:
         print(f"Error resizing images: {e}")
@@ -248,14 +248,13 @@ def main(args=None):
     
     if not args.skip_metrics:
         # Create directory for resized images (needed for FID and PSNR)
-        resized_original_dir = os.path.join(output_dir, "resized_original")
+        resized_original_dir = os.path.join(generation_output_dir, "resized_original")
         os.makedirs(resized_original_dir, exist_ok=True)
         
         # Calculate FID score
         try:
             print("\n--- Calculating FID Score ---")
-            coco_val_dir = os.path.join(coco_dir, "val2017")
-            fid_score = calculate_fid_coco(output_dir, resized_output_dir, coco_val_dir)
+            fid_score = calculate_fid(generation_output_dir, resized_output_dir, val2017_dir)
             metrics_results["fid_score"] = fid_score
         except Exception as e:
             print(f"Error calculating FID: {e}")
@@ -263,7 +262,7 @@ def main(args=None):
         # Calculate CLIP Score
         try:
             print("\n--- Calculating CLIP Score ---")
-            clip_score = calculate_clip_score(output_dir, image_filename_to_caption)
+            clip_score = calculate_clip_score(generation_output_dir, image_filename_to_caption)
             metrics_results["clip_score"] = clip_score
         except Exception as e:
             print(f"Error calculating CLIP Score: {e}")
@@ -271,7 +270,7 @@ def main(args=None):
         # Calculate ImageReward
         try:
             print("\n--- Calculating ImageReward ---")
-            image_reward = compute_image_reward(output_dir, image_filename_to_caption)
+            image_reward = compute_image_reward(generation_output_dir, image_filename_to_caption)
             metrics_results["image_reward"] = image_reward
         except Exception as e:
             print(f"Error calculating ImageReward: {e}")
@@ -348,7 +347,7 @@ def main(args=None):
             print(f"Average VRAM usage across all {len(all_vram_data)} images: {overall_avg_vram:.2f} GB")
     
     # Save summary report
-    summary_file = os.path.join(output_dir, "quantization_summary.txt")
+    summary_file = os.path.join(generation_output_dir, "quantization_summary.txt")
     with open(summary_file, "w", encoding="utf-8") as f:
         f.write("=== Quantization Summary ===\n\n")
         f.write(f"Processed {num_images_to_generate} COCO captions\n")
@@ -373,7 +372,7 @@ def main(args=None):
                 if metric_value is not None:
                     f.write(f"{metric_name.upper()}: {metric_value:.4f}\n")
     
-    print(f"Completed. Results saved to {output_dir}")
+    print(f"Completed. Results saved to {generation_output_dir}")
     print(f"Summary report: {summary_file}")
 
 
