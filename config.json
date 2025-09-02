@@ -1,7 +1,8 @@
 {
     "optimization": {
-        "apply_pruning": false,
+        "apply_pruning": true,
         "apply_quantization": true,
+        "apply_kvcache": true,
         "is_optimization_enabled": true
     },
     "model_params": {
@@ -10,34 +11,47 @@
         "bits": 4,
         "quant_method": "dynamic",
         "precision": "int4",
-        "num_images": 1,
+        "num_images": 500,
         "steps": 25,
         "guidance_scale": 7.5,
         "skip_metrics": false,
         "metrics_subset": 100,
-        "model_name": "Flux.1-schnell"
+        "model_name": "Flux.1-schnell",
+        "dataset_name": "MSCOCO2017"
     },
     "models": {
         "Flux.1-schnell": {
             "path": "black-forest-labs/FLUX.1-schnell",
+            "quant_path": "nunchaku-tech/nunchaku-flux.1-schnell/svdq-int4-flux.1-schnell.safetensors",
             "description": "Use for Image Generation task - text2image and sketch2image"
         },
         "Flux.1-dev": {
             "path": "black-forest-labs/FLUX.1-dev",
+            "quant_path": "nunchaku-tech/nunchaku-flux.1-dev/svdq-int4_r32-flux.1-dev.safetensors",
             "description": "Use for Inpainting task"
+        },
+        "SANA 1.6B": {
+            "path": "Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers",
+            "quant_path": "nunchaku-tech/nunchaku-sana/svdq-int4_r32-sana1.6b.safetensors",
+            "description": "Use for Image Generation task - text2image"
         },
         "SAM 2.1": {
             "path": "facebook/sam2.1-hiera-small",
             "description": "Use for Segmentation task - Segmentation Anything Model"
-        },
-        "SANA 1.6B": {
-            "path": "Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers",
-            "description": "Use for Image Generation task - text2image"
         }
     },
-    "dataset": {
-        "name": "MS COCO 2017",
-        "type": "image_captioning",
-        "path": "/coco/annotations"
-    }
+    "dataset": [
+        {
+            "name": "MSCOCO2017",
+            "type": "image_captioning",
+            "caption_path": "/coco/annotations",
+            "images_path": "/coco/val2017"
+        },
+        {
+            "name": "Flickr8k",
+            "type": "image_captioning",
+            "caption_path": "/flickr8k",
+            "images_path": "/flickr8k/images"
+        }
+    ]
 }

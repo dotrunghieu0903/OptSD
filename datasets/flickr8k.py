@@ -1,21 +1,13 @@
 import os
 from PIL import Image
 
-def process_flickr8k():
+def process_flickr8k(flickr_images_dir, flickr_captions_path):
     """
     Process Flickr8k dataset and return captions dictionary.
     
     Returns:
         dict: Dictionary mapping image filenames to their captions.
     """
-    # Define directories
-    flickr_images_dir = "./flickr8k/Images"
-    flickr_captions_path = "./flickr8k/captions.txt"
-    generated_image_dir = "./quantization/quant_outputs/flickr8k"
-
-    # Create the directory for generated images if it doesn't exist
-    os.makedirs(generated_image_dir, exist_ok=True)
-    
     # Dictionary to store image dimensions
     image_dimensions = {}
 
