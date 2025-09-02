@@ -356,7 +356,6 @@ def main(args=None):
             f.write(f"Average generation time: {avg_time:.2f} seconds per image\n")
             f.write(f"Total generation time: {sum(successful_generations):.2f} seconds\n")
             # Add VRAM usage to summary
-            all_vram_data = [meta.get("average_vram_gb") for meta in generation_metadata if meta.get("average_vram_gb") is not None]
             if all_vram_data:
                 overall_avg_vram = sum(all_vram_data) / len(all_vram_data)
                 f.write(f"Average VRAM usage across all {len(all_vram_data)} images: {overall_avg_vram:.2f} GB\n")
