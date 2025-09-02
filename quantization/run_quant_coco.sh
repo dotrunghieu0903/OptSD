@@ -14,11 +14,9 @@ echo "Running quantization with COCO dataset..."
 rm -rf quantization/quant_outputs/*
 
 # Run with parameters
-python quantization/quant_coco.py \
-  --num_images 5 \
-  --steps 25 \
-  --guidance_scale 3.5 \
-  --metrics_subset 5
+python quantization/quant_coco.py --num_images 5 --steps 50 --guidance_scale 3.5 --metrics_subset 5
   
 # Add --skip_metrics to skip metrics calculation if needed
 # python quantization/quant_coco.py --num_images 5 --steps 25 --guidance_scale 3.5 --metrics_subset 5 --skip_metrics
+
+python kvcache/sam_kvcache.py --coco_dir /coco --num_images 5 --benchmark --num_runs 5 --metrics_subset 20

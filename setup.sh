@@ -14,6 +14,16 @@ wget http://images.cocodataset.org/annotations/annotations_trainval2017.zip -O c
 unzip coco/val2017.zip -d coco
 unzip coco/annotations_trainval2017.zip -d coco
 
+# Download and extract flickr30k dataset manually
+wget "https://github.com/awsaf49/flickr-dataset/releases/download/v1.0/flickr30k_part00"
+wget "https://github.com/awsaf49/flickr-dataset/releases/download/v1.0/flickr30k_part01"
+wget "https://github.com/awsaf49/flickr-dataset/releases/download/v1.0/flickr30k_part02"
+cat flickr30k_part00 flickr30k_part01 flickr30k_part02 > flickr30k.zip
+rm flickr30k_part00 flickr30k_part01 flickr30k_part02
+unzip -q flickr30k.zip -d ./flickr30k
+rm flickr30k.zip
+
+
 # Run quantization + pruning module
 ./pruning/run_quant_pruning.sh
 
@@ -21,4 +31,10 @@ unzip coco/annotations_trainval2017.zip -d coco
 ./pruning/run_pruning.sh
 
 # Run quantization
-./quantization/run_quantization.sh
+./quantization/run_quant.sh
+./quantization/run_quant_flickr8k.sh
+
+python combined_optimization_coco.py --model_path "black-forest-labs/FLUX.1-dev" --precision int4 --pruning_amount 0.3 --use_kv_cache --num_images 1 --steps 25
+python combined_optimization_coco.py --model_path "Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers" --pruning_amount 0.3 --use_kv_cache --num_images 10 --steps 30
+
+python combination/combined_optimization_coco.py --model_path "black-forest-labs/FLUX.1-dev" --precision int4 --pruning_amount 0.3 --use_kv_cache --num_images 10 --steps 50 --monitor_vram

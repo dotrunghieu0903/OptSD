@@ -55,25 +55,35 @@ def load_model(precision_override=None):
         print(f"Error loading model: {e}")
         raise
 
-
 def create_pipeline(transformer):
     """Create pipeline from transformer model"""
+    pipeline_init_kwargs: dict = {}
+    # from nunchaku.models.text_encoders.t5_encoder import NunchakuT5EncoderModel
+
+    # text_encoder_2 = NunchakuT5EncoderModel.from_pretrained(
+    #     "mit-han-lab/nunchaku-t5/awq-int4-flux.1-t5xxl.safetensors"
+    # )
+    # pipeline_init_kwargs["text_encoder_2"] = text_encoder_2
+
+    transformer = NunchakuFluxTransformer2dModel.from_pretrained(
+        "mit-han-lab/nunchaku-flux.1-schnell/svdq-int4_r32-flux.1-schnell.safetensors", precision="int4"
+    )
+    pipeline_init_kwargs["transformer"] = transformer
     pipeline = FluxPipeline.from_pretrained(
         "black-forest-labs/FLUX.1-schnell", 
         transformer=transformer, 
-        torch_dtype=torch.bfloat16
+        torch_dtype=torch.bfloat16,
+        # **pipeline_init_kwargs
     ).to("cuda")
     
     pipeline.enable_model_cpu_offload()
     return pipeline
-
 
 def get_model_size(model):
     """Calculate the model size in MB"""
     model_size_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
     model_size_mb = model_size_bytes / (1024 * 1024)
     return model_size_mb
-
 
 def main(args=None):
     # Setup argument parser if args not provided

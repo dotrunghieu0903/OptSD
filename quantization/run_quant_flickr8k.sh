@@ -14,11 +14,7 @@ mkdir -p quantization/quant_outputs/flickr8k
 echo "Running quantization with Flickr8k dataset..."
 
 # Run with parameters
-python quantization/quant_flickr8k.py \
-  --num_images 1 \
-  --steps 25 \
-  --guidance_scale 3.5 \
-  --metrics_subset 5
-  
+python quantization/quant_flickr8k.py --num_images 10 --steps 50 --guidance_scale 3.5 --metrics_subset 5
+
 # Add --skip_metrics to skip metrics calculation if needed
 # python quantization/quant_flickr30k.py --num_images 5 --steps 25 --guidance_scale 3.5 --metrics_subset 5 --skip_metrics

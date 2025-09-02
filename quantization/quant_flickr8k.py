@@ -6,13 +6,14 @@ import sys
 import torch
 from PIL import Image
 from tqdm import tqdm
+import time
 
-from diffusers import FluxPipeline
+from diffusers import FluxPipeline, SanaPipeline
 from huggingface_hub import login
 # Fix import paths to be relative to the project root
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from metrics import calculate_clip_score, calculate_fid, calculate_lpips, calculate_psnr_resized, compute_image_reward
-from nunchaku import NunchakuFluxTransformer2dModel
+from nunchaku import NunchakuFluxTransformer2dModel, NunchakuSanaTransformer2DModel
 from nunchaku.utils import get_precision
 # Import preprocessing from current directory since we're already in the quantization module
 quantization_dir = os.path.dirname(os.path.abspath(__file__))
@@ -22,14 +23,12 @@ from quantization.preprocessing_flickr8k import process_flickr8k
 from resizing_image import resize_images
 from shared.resources_monitor import generate_image_and_monitor, write_generation_metadata_to_file
 
-
 def setup_memory_optimizations():
     """Apply memory optimizations to avoid CUDA OOM errors"""
     # PyTorch memory optimizations
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     gc.collect()
-
 
 def load_model(precision_override=None):
     """Load the model with specified precision or auto-detect"""
@@ -38,9 +37,12 @@ def load_model(precision_override=None):
         precision = precision_override if precision_override else get_precision()
         print(f"Using precision: {precision}")
         
+        # transformer_model_name = f"mit-han-lab/svdq-{precision}-flux.1-dev"
+        # transformer_model_name = f"mit-han-lab/svdq-{precision}-sana-1600m"
+        transformer_model_name = f"nunchaku-tech/nunchaku-sana/svdq-{precision}_r32-sana1.6b.safetensors"
         # Load transformer model
-        transformer = NunchakuFluxTransformer2dModel.from_pretrained(
-            f"mit-han-lab/svdq-{precision}-flux.1-schnell", 
+        transformer = NunchakuSanaTransformer2DModel.from_pretrained(
+            transformer_model_name,
             offload=True
         )
         return transformer, precision
@@ -48,11 +50,12 @@ def load_model(precision_override=None):
         print(f"Error loading model: {e}")
         raise
 
-
 def create_pipeline(transformer):
     """Create pipeline from transformer model"""
-    pipeline = FluxPipeline.from_pretrained(
-        "black-forest-labs/FLUX.1-schnell", 
+    # pipeline_path = "black-forest-labs/FLUX.1-dev"
+    pipeline_path = "Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers"
+    pipeline = SanaPipeline.from_pretrained(
+        pipeline_path, 
         transformer=transformer, 
         torch_dtype=torch.bfloat16
     ).to("cuda")
@@ -105,7 +108,9 @@ def main(args=None):
     print(f"Loaded {len(captions)} captions from Flickr8k dataset")
 
     # Create output directories
-    generation_output_dir = "quantization/quant_outputs/flickr8k"
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    generation_output_dir = f"quantization/quant_outputs/flickr8k/{timestamp}"
+
     os.makedirs(generation_output_dir, exist_ok=True)
     print(f"Created directory for generated images: {generation_output_dir}")
 
@@ -170,42 +175,42 @@ def main(args=None):
     # Keep track of generation time
     generation_times = {}
     
-    for i, (filename, prompt) in enumerate(tqdm(list(captions.items())[:num_images_to_generate], desc="Generating images")):
-        output_path = os.path.join(generation_output_dir, filename)
+    # for i, (filename, prompt) in enumerate(tqdm(list(captions.items())[:num_images_to_generate], desc="Generating images")):
+    #     output_path = os.path.join(generation_output_dir, filename)
         
-        print(f"\n\n{'='*80}")
-        print(f"Processing image {i+1}/{num_images_to_generate}: {filename} (Prompt: {prompt[:50]}...)")
-        print(f"Output will be saved to: {output_path}")
-        print(f"{'='*80}")
+    #     print(f"\n\n{'='*80}")
+    #     print(f"Processing image {i+1}/{num_images_to_generate}: {filename} (Prompt: {prompt[:50]}...)")
+    #     print(f"Output will be saved to: {output_path}")
+    #     print(f"{'='*80}")
         
-        # Skip if the image already exists
-        if os.path.exists(output_path):
-            print(f"Skipping generation for {filename} (already exists)")
-            continue
+    #     # Skip if the image already exists
+    #     if os.path.exists(output_path):
+    #         print(f"Skipping generation for {filename} (already exists)")
+    #         continue
             
-        try:
-            # Generate image and monitor VRAM
-            generation_time, metadata = generate_image_and_monitor(
-                pipeline, prompt, output_path, filename, 
-                num_inference_steps=args.steps, guidance_scale=args.guidance_scale
-            )
-            # Add the metadata to our list
-            generation_metadata.append(metadata)
-            # Add the generation time to the dictionary
-            generation_times[filename] = generation_time
-            print(f"Generated image {i+1}/{num_images_to_generate}: {filename}")
-            print(f"Image available at: {output_path}")
-            print(f"{'='*80}\n")
-        except Exception as e:
-            print(f"Error when generating image for prompt '{prompt[:50]}...': {e}")
-            generation_times[filename] = -1  # Indicate an error
+    #     try:
+    #         # Generate image and monitor VRAM
+    #         generation_time, metadata = generate_image_and_monitor(
+    #             pipeline, prompt, output_path, filename, 
+    #             num_inference_steps=args.steps, guidance_scale=args.guidance_scale
+    #         )
+    #         # Add the metadata to our list
+    #         generation_metadata.append(metadata)
+    #         # Add the generation time to the dictionary
+    #         generation_times[filename] = generation_time
+    #         print(f"Generated image {i+1}/{num_images_to_generate}: {filename}")
+    #         print(f"Image available at: {output_path}")
+    #         print(f"{'='*80}\n")
+    #     except Exception as e:
+    #         print(f"Error when generating image for prompt '{prompt[:50]}...': {e}")
+    #         generation_times[filename] = -1  # Indicate an error
             
-        # Force GC to free memory
-        if i % 10 == 0:
-            torch.cuda.empty_cache()
-            gc.collect()
+    #     # Force GC to free memory
+    #     if i % 10 == 0:
+    #         torch.cuda.empty_cache()
+    #         gc.collect()
             
-    print("Image generation complete.")
+    # print("Image generation complete.")
 
     # Save generation metadata
     metadata_file = os.path.join(generation_output_dir, "Flickr8k_quantization_metadata.json")
@@ -274,8 +279,9 @@ def main(args=None):
                                 and f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
             
             # Use the metrics_subset parameter to limit the number of images for metrics
+            # subset_size = min(args.metrics_subset, len(generated_filenames))
             subset_size = min(args.metrics_subset, len(generated_filenames))
-            selected_filenames = generated_filenames[:subset_size]
+            selected_filenames = generated_filenames[:len(generated_filenames)]
             
             # Manually resize original Flickr8k images to match generated images for LPIPS calculation
             original_dir = flickr_images_dir
@@ -307,14 +313,13 @@ def main(args=None):
         try:
             print("\n--- Calculating PSNR ---")
             # For Flickr8k dataset, we use resized generated images
-            original_dir = flickr_images_dir
             generated_filenames = [f for f in os.listdir(resized_output_dir) 
                                 if os.path.isfile(os.path.join(resized_output_dir, f))
                                 and f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
             
             # Use the metrics_subset parameter to limit the number of images for metrics
-            subset_size = min(args.metrics_subset, len(generated_filenames))
-            psnr_score = calculate_psnr_resized(original_dir, resized_output_dir, generated_filenames[:subset_size])
+            # subset_size = min(args.metrics_subset, len(generated_filenames))
+            psnr_score = calculate_psnr_resized(flickr_images_dir, resized_output_dir, generated_filenames[:len(generated_filenames)])
             metrics_results["psnr"] = psnr_score
         except Exception as e:
             print(f"Error calculating PSNR: {e}")

@@ -9,6 +9,7 @@ dependencies:
       - torch==2.6
       - torchvision==0.21
       - torchaudio==2.6
+      - numpy==1.26.3
       - lpips
       - clean-fid==0.1.35
       - image-reward==1.5
@@ -18,5 +19,7 @@ dependencies:
       - tqdm
       - pillow
       - pynvml
+      - opencv-python-headless
+      - segment-anything
       - https://huggingface.co/mit-han-lab/nunchaku/resolve/main/nunchaku-0.3.1+torch2.6-cp312-cp312-linux_x86_64.whl
       - git+https://github.com/openai/CLIP.git

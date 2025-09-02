@@ -1,14 +1,20 @@
 """
-Combined quantization and pruning with COCO dataset.
-This script applies both quantization and pruning techniques to a diffusion model
-and evaluates performance on 500 captions from the COCO dataset.
-It also calculates image quality metrics: FID, CLIP Score, ImageReward, LPIPS, and PSNR.
+Advanced Pruning with COCO dataset.
+This script applies advanced pruning techniques to a diffusion model
+and evaluates performance on captions from the COCO dataset.
+It includes multiple pruning methods: magnitude, structured, iterative, and attention head pruning.
+Image quality metrics calculated include: FID, CLIP Score, ImageReward, LPIPS, and PSNR.
 """
+
 import os
 import sys
-import gc
 import json
+import time
+import random
 import argparse
+import torch
+import gc
+import itertools
 from tqdm import tqdm
 from PIL import Image
 
@@ -21,27 +27,19 @@ from resizing_image import resize_images
 # Import from pruning module
 try:
     # First try relative import for the pruning module in this directory
-    from .pruning import get_model_size, get_sparsity, apply_magnitude_pruning
+    from .pruning import get_model_size, get_sparsity, apply_magnitude_pruning, apply_structured_pruning, iterative_pruning, prune_attention_heads
 except ImportError:
     # Fall back to direct import if running as script
-    from pruning import get_model_size, get_sparsity, apply_magnitude_pruning
+    from pruning import get_model_size, get_sparsity, apply_magnitude_pruning, apply_structured_pruning, iterative_pruning, prune_attention_heads
 
-import torch
 from huggingface_hub import login
 from diffusers import FluxPipeline
 from nunchaku import NunchakuFluxTransformer2dModel
-from nunchaku.utils import get_precision
-
-# Add parent directory to path for importing modules
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from shared.resources_monitor import generate_image_and_monitor
-from metrics import calculate_fid, compute_image_reward, calculate_clip_score, calculate_lpips, calculate_psnr_resized
-from resizing_image import resize_images
 
 # Configure PyTorch memory management
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-# Authenticate with Hugging Face
+# Authenticate with Hugging Face (replace with your own token if needed)
 login(token="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")
 
 def setup_memory_optimizations():
@@ -69,62 +67,24 @@ def setup_memory_optimizations():
     if hasattr(torch.cuda, 'set_per_process_memory_fraction'):
         torch.cuda.set_per_process_memory_fraction(0.9)
 
-def get_model_size(model):
-    """Calculate the size of the model in MB."""
-    param_size = 0
-    for param in model.parameters():
-        param_size += param.nelement() * param.element_size()
-    buffer_size = 0
-    for buffer in model.buffers():
-        buffer_size += buffer.nelement() * buffer.element_size()
-    
-    size_mb = (param_size + buffer_size) / 1024**2
-    return size_mb
-
-# These functions are now imported from pruning.py
-# - get_model_size
-# - get_sparsity
-# - apply_magnitude_pruning
-
-def load_model(precision=None):
+def load_model():
     """
-    Load the diffusion model with the specified precision.
+    Load the base diffusion model.
     
-    Args:
-        precision: The precision to use (int4, int8, etc.). If None, will use auto-detected.
-        
     Returns:
-        The loaded transformer model and precision used
+        The loaded transformer model
     """
-    if precision is None:
-        # Auto-detect precision
-        precision = get_precision()
-        print(f"Auto-detected precision: {precision}")
+    print("Loading base model...")
     
-    # Default to int4 if precision is still None
-    if precision is None:
-        precision = "int4"
-    
-    # Make sure precision is a string without extra whitespace
-    if isinstance(precision, str):
-        precision = precision.strip()
-    
-    print(f"Loading model with {precision} quantization...")
-    
-    # Construct model path based on precision
-    # model_path = f"mit-han-lab/svdq-{precision}-flux.1-schnell"
+    # Load the transformer model
+    # model_path = "nunchaku-tech/nunchaku-flux.1-dev/svdq-int4_r32-flux.1-dev.safetensors"
     model_path = "nunchaku-tech/nunchaku-flux.1-schnell/svdq-int4_r32-flux.1-schnell.safetensors"
+    transformer = NunchakuFluxTransformer2dModel.from_pretrained(model_path, offload=True)
     
-    try:
-        transformer = NunchakuFluxTransformer2dModel.from_pretrained(model_path, offload=True)
-    except Exception as e:
-        print(f"Error loading model with precision {precision}: {e}")
-        print("Falling back to int4 precision...")
-        model_path = "mit-han-lab/svdq-int4-flux.1-schnell"
-        transformer = NunchakuFluxTransformer2dModel.from_pretrained(model_path, offload=True)
-        precision = "int4"
+    original_size = get_model_size(transformer)
+    print(f"Original model size: {original_size:.2f} MB")
     
-    return transformer, precision
+    return transformer
 
 def create_pipeline(transformer):
     """
@@ -136,9 +96,11 @@ def create_pipeline(transformer):
     Returns:
         The diffusion pipeline
     """
+    # pipe_path = "black-forest-labs/FLUX.1-dev"
+    pipe_path = "black-forest-labs/FLUX.1-schnell"
     # Create the pipeline with memory optimizations
     pipeline = FluxPipeline.from_pretrained(
-        "black-forest-labs/FLUX.1-schnell",
+        pipe_path,
         transformer=transformer,
         torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True
@@ -175,7 +137,6 @@ def enhance_caption(caption):
     ]
     
     # Select a random prefix
-    import random
     prefix = random.choice(enhanced_prefixes)
     
     # Combine prefix with caption and ensure first letter of caption is lowercase
@@ -294,31 +255,87 @@ def load_coco_captions(annotations_file, limit=500):
     
     # Print some examples of enhanced captions
     print("\nExample enhanced captions:")
-    import itertools
     for filename, caption in itertools.islice(image_filename_to_caption.items(), 3):
         print(f"  - {filename}: {caption}")
     
     return image_filename_to_caption, image_dimensions
 
+def apply_pruning_method(transformer, method, amount, structured_dim=0, iterative_steps=5):
+    """
+    Apply the specified pruning method to the transformer model.
+    
+    Args:
+        transformer: The transformer model to prune
+        method: Pruning method ("magnitude", "structured", "iterative", "attention_heads")
+        amount: Amount to prune (0.0 to 1.0)
+        structured_dim: Dimension for structured pruning (0 for rows, 1 for columns)
+        iterative_steps: Number of steps for iterative pruning
+        
+    Returns:
+        The pruned transformer
+    """
+    print(f"Applying {method} pruning with amount {amount}...")
+    
+    original_size = get_model_size(transformer)
+    
+    if method == "magnitude":
+        pruned_transformer = apply_magnitude_pruning(transformer, amount=amount)
+    elif method == "structured":
+        pruned_transformer = apply_structured_pruning(transformer, amount=amount, dim=structured_dim)
+    elif method == "iterative":
+        pruned_transformer = iterative_pruning(transformer, final_amount=amount, steps=iterative_steps)
+    elif method == "attention_heads":
+        # Calculate how many heads to prune per layer
+        num_layers = len([name for name, _ in transformer.named_modules() 
+                         if "attention" in name and "output" in name])
+        num_heads = 8  # Typical number of heads per layer
+        heads_per_layer = max(1, int(num_heads * amount))
+        
+        heads_to_prune = {}
+        for i in range(num_layers):
+            heads_to_prune[i] = list(range(heads_per_layer))
+        
+        pruned_transformer = prune_attention_heads(transformer, heads_to_prune)
+    else:
+        print(f"Unknown pruning method: {method}. Using magnitude pruning.")
+        pruned_transformer = apply_magnitude_pruning(transformer, amount=amount)
+    
+    # Calculate model size after pruning
+    pruned_size = get_model_size(pruned_transformer)
+    size_reduction = original_size - pruned_size
+    size_reduction_percentage = 100 * size_reduction / original_size if original_size > 0 else 0
+    
+    sparsity = get_sparsity(pruned_transformer)
+    
+    print(f"Original model size: {original_size:.2f} MB")
+    print(f"Pruned model size: {pruned_size:.2f} MB")
+    print(f"Size reduction: {size_reduction:.2f} MB ({size_reduction_percentage:.1f}%)")
+    print(f"Model sparsity after pruning: {sparsity:.2f}%")
+    
+    pruning_stats = {
+        "original_size_mb": original_size,
+        "pruned_size_mb": pruned_size,
+        "size_reduction_mb": size_reduction,
+        "size_reduction_percent": size_reduction_percentage,
+        "sparsity_percent": sparsity
+    }
+    
+    return pruned_transformer, pruning_stats
+
 def main(args=None):
     # If no args provided, parse them from command line
     if args is None:
         # Setup argument parser
-        parser = argparse.ArgumentParser(description="Combined Pruning and Quantization with COCO dataset")
+        parser = argparse.ArgumentParser(description="Advanced Pruning with COCO dataset")
         parser.add_argument("--pruning_amount", type=float, default=0.3, 
                             help="Amount of weights to prune (0.0 to 0.9)")
         parser.add_argument("--pruning_method", type=str, default="magnitude", 
                             choices=["magnitude", "structured", "iterative", "attention_heads"],
                             help="Pruning method to use")
-        # parser.add_argument("--bits", type=int, default=8, 
-        #                     choices=[8, 4, 2],
-        #                     help="Bit precision for quantization")
-        parser.add_argument("--quant_method", type=str, default="dynamic", 
-                            choices=["static", "dynamic", "aware_training"],
-                            help="Quantization method to use")
-        parser.add_argument("--precision", type=str, default="int4", 
-                            choices=["int8", "int4", "int2"],
-                            help="Precision to use for quantization")
+        parser.add_argument("--structured_dim", type=int, default=0,
+                            help="Dimension for structured pruning (0 for rows, 1 for columns)")
+        parser.add_argument("--iterative_steps", type=int, default=5,
+                            help="Number of steps for iterative pruning")
         parser.add_argument("--num_images", type=int, default=500,
                             help="Number of COCO images to process")
         parser.add_argument("--steps", type=int, default=30,
@@ -329,15 +346,17 @@ def main(args=None):
                             help="Skip calculation of image quality metrics")
         parser.add_argument("--metrics_subset", type=int, default=100,
                             help="Number of images to use for metrics calculation (default: 100)")
+        parser.add_argument("--output_dir", type=str, default="pruning/advanced_pruned_outputs",
+                            help="Directory to save output images and metrics")
         args = parser.parse_args()
     
     # Setup memory optimizations to avoid CUDA OOM errors
     setup_memory_optimizations()
     
     # Create output directories
-    output_dir = "pruning/quant_pruned_outputs"
+    output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
-    
+
     # Define COCO paths
     coco_dir = "coco"
     annotations_file = os.path.join(coco_dir, "annotations", "captions_val2017.json")
@@ -348,54 +367,38 @@ def main(args=None):
         annotations_file, limit=args.num_images
     )
     
-    # 2. Load the model with quantization
-    print("\n=== Loading Quantized Model ===")
-    try:
-        # Check if precision is available in args
-        precision_param = getattr(args, 'precision', None)
-        transformer, precision = load_model(precision_param)
-        quantized_size = get_model_size(transformer)
-        print(f"Quantized model size: {quantized_size:.2f} MB")
-    except Exception as e:
-        print(f"Error loading quantized model: {e}")
-        print("Trying again with default parameters...")
-        try:
-            # Fallback to default model
-            model_path = "mit-han-lab/svdq-int4-flux.1-schnell"
-            transformer = NunchakuFluxTransformer2dModel.from_pretrained(model_path, offload=True)
-            precision = "int4"
-            quantized_size = get_model_size(transformer)
-            print(f"Loaded fallback model with size: {quantized_size:.2f} MB")
-        except Exception as e2:
-            print(f"Fatal error loading model: {e2}")
-            return
+    # 2. Load the model
+    print("\n=== Loading Base Model ===")
+    transformer = load_model()
     
-    # 3. Apply pruning to the quantized model
-    print("\n=== Applying Pruning to Quantized Model ===")
-    try:
-        # Use apply_magnitude_pruning from the pruning module
-        pruned_transformer = apply_magnitude_pruning(transformer, amount=args.pruning_amount)
-        combined_size = get_model_size(pruned_transformer)
-        print(f"Combined (quantized+pruned) model size: {combined_size:.2f} MB")
-    except Exception as e:
-        print(f"Error during pruning: {e}")
-        print("Proceeding with unpruned quantized model")
-        pruned_transformer = transformer
-        combined_size = quantized_size
+    # 3. Apply pruning to the model based on selected method
+    print(f"\n=== Applying {args.pruning_method} Pruning to Model ===")
+    pruned_transformer, pruning_stats = apply_pruning_method(
+        transformer, 
+        method=args.pruning_method,
+        amount=args.pruning_amount,
+        structured_dim=args.structured_dim,
+        iterative_steps=args.iterative_steps
+    )
     
-    # Create pipeline with the quantized and pruned model
-    print("\n=== Creating Pipeline ===")
+    # Create pipeline with the pruned model
+    print("\n=== Creating Pipeline with Pruned Model ===")
     try:
         pipeline = create_pipeline(pruned_transformer)
         
         # Test the pipeline with a simple prompt to ensure it works
         print("Testing pipeline with a simple prompt...")
         test_image = pipeline(
-            "a high quality photo of ma motorcycle parked on the gravel in front of a garage",
+            "a high quality photo of a motorcycle parked on the gravel in front of a garage",
             num_inference_steps=1,
             guidance_scale=7.5
         ).images[0]
         print("Pipeline test successful!")
+        
+        # Save the test image
+        # test_image_path = os.path.join(output_dir, "test_image.png")
+        # test_image.save(test_image_path)
+        # print(f"Test image saved to {test_image_path}")
         
         # Clear memory
         del test_image
@@ -460,7 +463,6 @@ def main(args=None):
     else:
         print("\n=== Calculating Image Quality Metrics ===")
     
-    if not args.skip_metrics:
         # Create directory for resized images (needed for FID and PSNR)
         resized_output_dir = os.path.join(output_dir, "resized")
         os.makedirs(resized_output_dir, exist_ok=True)
@@ -518,22 +520,24 @@ def main(args=None):
             # Manually resize original COCO images to match generated images for LPIPS calculation
             original_dir = os.path.join(coco_dir, "val2017")
             for filename in tqdm(selected_filenames, desc="Resizing original images for LPIPS"):
-                original_path = os.path.join(original_dir, filename)
-                resized_original_path = os.path.join(resized_original_dir, filename)
-                
-                if os.path.exists(original_path):
-                    try:
-                        # Get the size of the resized generated image for consistency
-                        generated_img_path = os.path.join(resized_output_dir, filename)
-                        generated_img = Image.open(generated_img_path)
-                        target_size = generated_img.size
-                        
-                        # Resize the original image to match the generated image
-                        original_img = Image.open(original_path).convert("RGB")
-                        resized_original_img = original_img.resize(target_size, Image.LANCZOS)
-                        resized_original_img.save(resized_original_path)
-                    except Exception as e:
-                        print(f"Error resizing original image {filename}: {e}")
+                try:
+                    # Load the original image
+                    original_path = os.path.join(original_dir, filename)
+                    original_img = Image.open(original_path).convert("RGB")
+                    
+                    # Get the target size from the generated resized image
+                    gen_img_path = os.path.join(resized_output_dir, filename)
+                    gen_img = Image.open(gen_img_path)
+                    target_size = gen_img.size
+                    
+                    # Resize the original image
+                    resized_original = original_img.resize(target_size, Image.Resampling.LANCZOS)
+                    
+                    # Save the resized original
+                    resized_original_path = os.path.join(resized_original_dir, filename)
+                    resized_original.save(resized_original_path)
+                except Exception as e:
+                    print(f"Error resizing original image {filename}: {e}")
             
             # Now calculate LPIPS using the resized original and generated images
             lpips_score = calculate_lpips(resized_original_dir, resized_output_dir, selected_filenames)
@@ -544,34 +548,32 @@ def main(args=None):
         # Calculate PSNR - we need original images to compare with generated images
         try:
             print("\n--- Calculating PSNR ---")
-            # For COCO dataset, we use resized generated images
-            original_dir = os.path.join(coco_dir, "val2017")
-            generated_filenames = [f for f in os.listdir(resized_output_dir) if os.path.isfile(os.path.join(resized_output_dir, f))
-                                and f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
-            
-            # Use the metrics_subset parameter to limit the number of images for metrics
-            subset_size = min(args.metrics_subset, len(generated_filenames))
-            psnr_score = calculate_psnr_resized(original_dir, resized_output_dir, generated_filenames[:subset_size])
+            # We use the same resized images prepared for LPIPS
+            psnr_score = calculate_psnr_resized(resized_original_dir, resized_output_dir, selected_filenames)
             metrics_results["psnr"] = psnr_score
         except Exception as e:
             print(f"Error calculating PSNR: {e}")
     
     # Save metadata to JSON file
-    metadata_file = os.path.join(output_dir, "quant_pruned_metadata.json")
+    metadata_file = os.path.join(output_dir, f"{args.pruning_method}_pruning_metadata.json")
     try:
         # Add metrics to metadata
         combined_metadata = {
             "model_info": {
-                "precision": precision,
+                "pruning_method": args.pruning_method,
                 "pruning_amount": args.pruning_amount,
-                "model_size_mb": combined_size
+                "pruning_stats": pruning_stats
+            },
+            "generation_params": {
+                "inference_steps": args.steps,
+                "guidance_scale": args.guidance_scale
             },
             "generation_metadata": generation_metadata
-            #"metrics": metrics_results
         }
         
         with open(metadata_file, 'w', encoding='utf-8') as f:
-            json.dump(combined_metadata, f, ensure_ascii=False, indent=4)
+            json.dump(combined_metadata, f, indent=2)
+            
         print(f"Saved metadata to: {metadata_file}")
     except Exception as e:
         print(f"Error when saving metadata JSON: {e}")
@@ -588,35 +590,43 @@ def main(args=None):
         # Calculate average VRAM usage across all images
         all_vram_data = [meta.get("average_vram_gb") for meta in generation_metadata if meta.get("average_vram_gb") is not None]
         if all_vram_data:
-            overall_avg_vram = sum(all_vram_data) / len(all_vram_data)
-            print(f"Average VRAM usage across all {len(all_vram_data)} images: {overall_avg_vram:.2f} GB")
+            avg_vram = sum(all_vram_data) / len(all_vram_data)
+            max_vram = max([meta.get("max_vram_gb", 0) for meta in generation_metadata])
+            print(f"Average VRAM usage: {avg_vram:.2f} GB")
+            print(f"Maximum VRAM usage: {max_vram:.2f} GB")
     
     # Save summary report
-    with open(os.path.join(output_dir, "quant_pruning_summary.txt"), "w", encoding="utf-8") as f:
-        f.write("=== Combined Quantization and Pruning Summary ===\n\n")
+    with open(os.path.join(output_dir, f"{args.pruning_method}_pruning_summary.txt"), "w", encoding='utf-8') as f:
+        f.write(f"=== {args.pruning_method.capitalize()} Pruning Summary ===\n\n")
         f.write(f"Processed {len(image_filename_to_caption)} COCO captions\n")
         f.write(f"Inference steps: {args.steps}\n")
-        f.write(f"Quantization: {precision}\n")
+        f.write(f"Guidance scale: {args.guidance_scale}\n")
+        f.write(f"Pruning method: {args.pruning_method}\n")
         f.write(f"Pruning amount: {args.pruning_amount*100:.1f}%\n")
-        f.write(f"Combined model size: {combined_size:.2f} MB\n")
+        f.write(f"Original model size: {pruning_stats['original_size_mb']:.2f} MB\n")
+        f.write(f"Pruned model size: {pruning_stats['pruned_size_mb']:.2f} MB\n")
+        f.write(f"Size reduction: {pruning_stats['size_reduction_mb']:.2f} MB ({pruning_stats['size_reduction_percent']:.1f}%)\n")
+        f.write(f"Model sparsity: {pruning_stats['sparsity_percent']:.2f}%\n\n")
+        
         if successful_generations:
             f.write(f"Successfully generated {len(successful_generations)}/{len(image_filename_to_caption)} images\n")
             f.write(f"Average generation time: {avg_time:.2f} seconds per image\n")
-            f.write(f"Total generation time: {sum(successful_generations):.2f} seconds\n")
-            # Add VRAM usage to summary
-            all_vram_data = [meta.get("average_vram_gb") for meta in generation_metadata if meta.get("average_vram_gb") is not None]
+            f.write(f"Total generation time: {sum(successful_generations):.2f} seconds\n\n")
+            
             if all_vram_data:
-                overall_avg_vram = sum(all_vram_data) / len(all_vram_data)
-                f.write(f"Average VRAM usage across all {len(all_vram_data)} images: {overall_avg_vram:.2f} GB\n")
+                f.write(f"Average VRAM usage: {avg_vram:.2f} GB\n")
+                f.write(f"Maximum VRAM usage: {max_vram:.2f} GB\n\n")
         
         # Add metrics results to summary
         if metrics_results:
-            f.write("\n=== Image Quality Metrics ===\n")
+            f.write("=== Image Quality Metrics ===\n")
             for metric_name, metric_value in metrics_results.items():
-                if metric_value is not None:
-                    f.write(f"{metric_name.upper()}: {metric_value:.4f}\n")
+                f.write(f"{metric_name}: {metric_value}\n")
     
     print(f"Completed. Results saved to {output_dir}")
+    
+    # Return success
+    return 0
 
 if __name__ == "__main__":
     main()

@@ -23,8 +23,9 @@ from pruning import get_model_size, get_sparsity, apply_magnitude_pruning, load_
 
 import torch
 from huggingface_hub import login
-from diffusers import FluxPipeline
-from nunchaku import NunchakuFluxTransformer2dModel
+from diffusers import FluxPipeline, SanaPipeline
+from nunchaku import NunchakuFluxTransformer2dModel, NunchakuSanaTransformer2DModel
+import time
 
 # Configure PyTorch memory management
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -68,9 +69,10 @@ def load_model():
     print(f"Loading standard model...")
     
     # Load the sharded model files
-    model_path = "nunchaku-tech/nunchaku-flux.1-dev/svdq-int4_r32-flux.1-dev.safetensors"  # Using dev model
-    transformer = NunchakuFluxTransformer2dModel.from_pretrained(model_path, offload=True)
-    
+    # model_path = "nunchaku-tech/nunchaku-flux.1-dev/svdq-int4_r32-flux.1-dev.safetensors"
+    model_path = "nunchaku-tech/nunchaku-sana/svdq-int4_r32-sana1.6b.safetensors"
+    transformer = NunchakuSanaTransformer2DModel.from_pretrained(model_path, offload=True)
+
     return transformer
 
 def create_pipeline(transformer):
@@ -83,9 +85,11 @@ def create_pipeline(transformer):
     Returns:
         The diffusion pipeline
     """
+    # pipeline_path = "black-forest-labs/FLUX.1-dev"
+    pipeline_path = "Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers"
     # Create the pipeline with memory optimizations
-    pipeline = FluxPipeline.from_pretrained(
-        "black-forest-labs/FLUX.1-dev",  # Using dev model
+    pipeline = SanaPipeline.from_pretrained(
+        pipeline_path,
         transformer=transformer,
         torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True
@@ -273,7 +277,8 @@ def main(args=None):
     setup_memory_optimizations()
     
     # Create output directories
-    output_dir = "pruning/pruned_outputs"
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    output_dir = "pruning/pruned_outputs/{}".format(timestamp)
     os.makedirs(output_dir, exist_ok=True)
     
     # Define COCO paths

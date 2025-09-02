@@ -8,7 +8,6 @@ specifically targeting the transformer components in models like FluxPipeline.
 import torch
 import torch.nn as nn
 import torch.nn.utils.prune as prune
-import numpy as np
 from diffusers import FluxPipeline
 from nunchaku import NunchakuFluxTransformer2dModel
 import time

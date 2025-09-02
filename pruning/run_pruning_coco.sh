@@ -76,7 +76,5 @@ eval $CMD
 
 # Exit with the same code as the python script
 exit $?
-# model_path = "nunchaku-tech/nunchaku-flux.1-dev/svdq-int4_r32-flux.1-dev.safetensors"  # Using dev model
-#     transformer = NunchakuFluxTransformer2dModel.from_pretrained(
-#         model_path
-#     )
+
+python ./pruning/pruning_coco.py  --pruning_amount 0.3 --pruning_method magnitude --num_images 1000 --steps 50 --guidance_scale 3.5 --metrics_subset 1000

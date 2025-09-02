@@ -1,0 +1,20 @@
+=== Flickr8k Quantization Summary ===
+
+Processed 1000 Flickr8k captions
+Inference steps: 25
+Guidance scale: 3.5
+Quantization: int4
+Model size: 102.80 MB
+
+Generation Statistics:
+- Successfully generated: 1000/1000 images
+- Average generation time: 20.27 seconds per image
+- Total generation time: 20266.31 seconds
+- Average VRAM usage: 7.71 GB
+
+Metrics:
+- fid_score: 59.2415
+- clip_score: 32.5356
+- image_reward: 1.2085
+- lpips: 0.6457
+- psnr: 8.6435
