@@ -1,8 +1,8 @@
 {
     "optimization": {
-        "apply_pruning": true,
+        "apply_pruning": false,
         "apply_quantization": true,
-        "apply_kvcache": true,
+        "apply_kvcache": false,
         "is_optimization_enabled": true
     },
     "model_params": {
@@ -17,7 +17,7 @@
         "skip_metrics": false,
         "metrics_subset": 100,
         "model_name": "Flux.1-schnell",
-        "dataset_name": "MSCOCO2017"
+        "dataset_name": "Flickr8k"
     },
     "models": {
         "Flux.1-schnell": {
@@ -40,18 +40,18 @@
             "description": "Use for Segmentation task - Segmentation Anything Model"
         }
     },
-    "dataset": [
+    "datasets": [
         {
             "name": "MSCOCO2017",
             "type": "image_captioning",
-            "caption_path": "/coco/annotations",
-            "images_path": "/coco/val2017"
+            "caption_path": "coco/annotations",
+            "images_path": "coco/val2017"
         },
         {
             "name": "Flickr8k",
             "type": "image_captioning",
-            "caption_path": "/flickr8k",
-            "images_path": "/flickr8k/images"
+            "caption_path": "flickr8k",
+            "images_path": "flickr8k/Images"
         }
     ]
 }

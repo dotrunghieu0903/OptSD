@@ -4,6 +4,7 @@ import argparse
 import gc
 import os
 from PIL import Image
+import time
 import torch
 from tqdm import tqdm
 
@@ -11,32 +12,25 @@ from diffusers import FluxPipeline
 from huggingface_hub import login
 # Fix import paths to be relative to the project root
 import sys
-import os
 # Add the project root to the path if needed
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, project_root)
 from metrics import calculate_clip_score, calculate_fid, calculate_lpips, calculate_psnr_resized, compute_image_reward
 from nunchaku import NunchakuFluxTransformer2dModel
 from nunchaku.utils import get_precision
 # Import preprocessing from current directory since we're already in the quantization module
 # Use explicit import path to make sure it works both when imported and when run directly
-import os
-import sys
 # Get the absolute path to the quantization directory
 quantization_dir = os.path.dirname(os.path.abspath(__file__))
 if quantization_dir not in sys.path:
     sys.path.append(quantization_dir)
-from quantization.preprocessing_coco import preprocessing_coco
-from resizing_image import resize_images
+
+from dataset.coco import process_coco
+from dataset.flickr8k import process_flickr8k
+
+from shared.resizing_image import resize_images
 from shared.resources_monitor import generate_image_and_monitor, write_generation_metadata_to_file
-
-
-def setup_memory_optimizations():
-    """Apply memory optimizations to avoid CUDA OOM errors"""
-    # PyTorch memory optimizations
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    gc.collect()
-
+from shared.cleanup import setup_memory_optimizations
 
 def load_model(precision_override=None):
     """Load the model with specified precision or auto-detect"""
@@ -88,17 +82,14 @@ def get_model_size(model):
 def main(args=None):
     # Setup argument parser if args not provided
     if args is None:
-        parser = argparse.ArgumentParser(description="Quantization with COCO dataset")
-        # parser.add_argument("--bits", type=int, default=8, 
-        #                     choices=[8, 4, 2],
-        #                     help="Bit precision for quantization")
+        parser = argparse.ArgumentParser()
         parser.add_argument("--quant_method", type=str, default="dynamic", 
                             choices=["static", "dynamic", "aware_training"],
                             help="Quantization method to use")
         parser.add_argument("--precision", type=str, default=None, 
                             help="Precision to use (default is auto-detected)")
         parser.add_argument("--num_images", type=int, default=500,
-                            help="Number of COCO images to process")
+                            help="Number of images to process")
         parser.add_argument("--steps", type=int, default=30,
                             help="Number of inference steps")
         parser.add_argument("--guidance_scale", type=float, default=3.5,
@@ -107,6 +98,12 @@ def main(args=None):
                             help="Skip calculation of image quality metrics")
         parser.add_argument("--metrics_subset", type=int, default=100,
                             help="Number of images to use for metrics calculation (default: 100)")
+        parser.add_argument("dataset_name", type=str, default="MSCOCO2017",
+                            help="Name of the dataset to use")
+        parser.add_argument("--caption_path", type=str, default=None,
+                            help="Path to the captions file")
+        parser.add_argument("--images_path", type=str, default=None,
+                            help="Path to the images directory")
         args = parser.parse_args()
     
     # Apply memory optimizations
@@ -116,16 +113,26 @@ def main(args=None):
     login(token="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")
 
     # Define paths
-    coco_dir = "coco"
-    annotations_dir = os.path.join(coco_dir, "annotations")
-    val2017_dir = os.path.join(coco_dir, "val2017")
+    annotations_dir = args.caption_path
+    image_dir = args.images_path
 
-    # Process COCO dataset
-    print("\n=== Loading COCO Captions ===")
-    image_filename_to_caption, image_dimensions, image_id_to_dimensions = preprocessing_coco(annotations_dir)
+    generation_output_dir = ""
+    image_filename_to_caption = {}
+    image_dimensions = {}
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    if args.dataset_name == "MSCOCO2017":
+        # Process COCO dataset
+        print("\n=== Loading COCO Captions ===")
+        image_filename_to_caption, image_dimensions, _ = process_coco(annotations_dir)
+        generation_output_dir = f"quantization/quant_outputs/coco/{timestamp}"
+    else:
+        # Process Flickr8k dataset
+        print("\n=== Loading Flickr8k Captions ===")
+        flickr_captions_path = f"{args.caption_path}/captions.txt"
+        image_filename_to_caption, image_dimensions = process_flickr8k(image_dir, flickr_captions_path)
+        generation_output_dir = f"quantization/quant_outputs/flickr8k/{timestamp}"
 
     # Create output directories
-    generation_output_dir = "quantization/quant_outputs/coco"
     os.makedirs(generation_output_dir, exist_ok=True)
     print(f"Created directory for generated images: {generation_output_dir}")
 
@@ -141,17 +148,6 @@ def main(args=None):
         print(f"Quantized model size: {quantized_size:.2f} MB")
     except Exception as e:
         print(f"Error loading quantized model: {e}")
-        print("Trying again with default parameters...")
-        try:
-            # Fallback to default model
-            model_path = "mit-han-lab/svdq-int4-flux.1-dev"
-            transformer = NunchakuFluxTransformer2dModel.from_pretrained(model_path, offload=True)
-            precision = "int4"
-            quantized_size = get_model_size(transformer)
-            print(f"Loaded fallback model with size: {quantized_size:.2f} MB")
-        except Exception as e2:
-            print(f"Fatal error loading model: {e2}")
-            return
 
     # Create pipeline with the quantized model
     print("\n=== Creating Pipeline ===")
@@ -173,22 +169,18 @@ def main(args=None):
         gc.collect()
         
     except Exception as e:
-        print(f"Error creating pipeline: {e}")
-        print("Cannot proceed without a working pipeline")
+        print(f"Error creating pipeline: {e}. Cannot proceed without a working pipeline")
         return
 
     # Create a list to store generation metadata
     generation_metadata = []
     
-    # 2. Generate images for COCO captions
-    print(f"\n=== Generating Images for COCO Captions ===")
+    # 2. Generate images for captions
+    print(f"\n=== Generating Images for Captions ===")
     
     # Limit the number of images to generate based on the command-line argument
     num_images_to_generate = min(args.num_images, len(image_filename_to_caption))
     print(f"Will generate {num_images_to_generate} images")
-    
-    # Create a reverse mapping from filename to image_id
-    image_filename_to_id = {v[2]: k for k, v in image_id_to_dimensions.items()}
     
     # Keep track of generation time
     generation_times = {}
@@ -196,7 +188,7 @@ def main(args=None):
     for i, (filename, prompt) in enumerate(tqdm(list(image_filename_to_caption.items())[:num_images_to_generate], desc="Generating images")):
         output_path = os.path.join(generation_output_dir, filename)
         
-        print(f"\n\n{'='*80}")
+        print(f"\n{'='*80}")
         print(f"Processing image {i+1}/{num_images_to_generate}: {filename} (Prompt: {prompt[:50]}...)")
         print(f"Output will be saved to: {output_path}")
         print(f"{'='*80}")
@@ -210,7 +202,8 @@ def main(args=None):
             # Generate image and monitor VRAM
             generation_time, metadata = generate_image_and_monitor(
                 pipeline, prompt, output_path, filename, 
-                num_inference_steps=args.steps, guidance_scale=args.guidance_scale
+                num_inference_steps=args.steps,
+                guidance_scale=args.guidance_scale
             )
             # Add the metadata to our list
             generation_metadata.append(metadata)
@@ -231,7 +224,7 @@ def main(args=None):
     print("Image generation complete.")
 
     # Save generation metadata
-    metadata_file = os.path.join(generation_output_dir, "coco_quantization_metadata.json")
+    metadata_file = os.path.join(generation_output_dir, "quantization_metadata.json")
     write_generation_metadata_to_file(metadata_file)
 
     # Calculate and print average generation time
@@ -250,13 +243,8 @@ def main(args=None):
 
     # 4. Calculate Image Quality Metrics (if not skipped)
     metrics_results = {}
-    
-    if args.skip_metrics:
-        print("\n=== Skipping Image Quality Metrics (--skip_metrics flag set) ===")
-    else:
-        print("\n=== Calculating Image Quality Metrics ===")
-    
     if not args.skip_metrics:
+        print("\n=== Calculating Image Quality Metrics ===")
         # Create directory for resized images (needed for FID and PSNR)
         resized_original_dir = os.path.join(generation_output_dir, "resized_original")
         os.makedirs(resized_original_dir, exist_ok=True)
@@ -264,7 +252,7 @@ def main(args=None):
         # Calculate FID score
         try:
             print("\n--- Calculating FID Score ---")
-            fid_score = calculate_fid(generation_output_dir, resized_output_dir, val2017_dir)
+            fid_score = calculate_fid(generation_output_dir, resized_output_dir, image_dir)
             metrics_results["fid_score"] = fid_score
         except Exception as e:
             print(f"Error calculating FID: {e}")
@@ -288,7 +276,7 @@ def main(args=None):
         # Calculate LPIPS - we need original images to compare with generated images
         try:
             print("\n--- Calculating LPIPS ---")
-            # For COCO dataset, we need to select a subset of filenames for LPIPS calculation
+            # For dataset, we need to select a subset of filenames for LPIPS calculation
             # We should compare resized images to ensure dimensions match
             
             # Get list of generated filenames that have been resized
@@ -301,9 +289,8 @@ def main(args=None):
             selected_filenames = generated_filenames[:subset_size]
             
             # Manually resize original COCO images to match generated images for LPIPS calculation
-            original_dir = os.path.join(coco_dir, "val2017")
             for filename in tqdm(selected_filenames, desc="Resizing original images for LPIPS"):
-                original_path = os.path.join(original_dir, filename)
+                original_path = os.path.join(image_dir, filename)
                 resized_original_path = os.path.join(resized_original_dir, filename)
                 
                 if os.path.exists(original_path):
@@ -329,15 +316,14 @@ def main(args=None):
         # Calculate PSNR - we need original images to compare with generated images
         try:
             print("\n--- Calculating PSNR ---")
-            # For COCO dataset, we use resized generated images
-            original_dir = os.path.join(coco_dir, "val2017")
+            # For dataset, we use resized generated images
             generated_filenames = [f for f in os.listdir(resized_output_dir) 
                                 if os.path.isfile(os.path.join(resized_output_dir, f))
                                 and f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
             
             # Use the metrics_subset parameter to limit the number of images for metrics
             subset_size = min(args.metrics_subset, len(generated_filenames))
-            psnr_score = calculate_psnr_resized(original_dir, resized_output_dir, generated_filenames[:subset_size])
+            psnr_score = calculate_psnr_resized(image_dir, resized_output_dir, generated_filenames[:subset_size])
             metrics_results["psnr"] = psnr_score
         except Exception as e:
             print(f"Error calculating PSNR: {e}")
@@ -360,7 +346,7 @@ def main(args=None):
     summary_file = os.path.join(generation_output_dir, "quantization_summary.txt")
     with open(summary_file, "w", encoding="utf-8") as f:
         f.write("=== Quantization Summary ===\n\n")
-        f.write(f"Processed {num_images_to_generate} COCO captions\n")
+        f.write(f"Processed {num_images_to_generate} captions\n")
         f.write(f"Inference steps: {args.steps}\n")
         f.write(f"Guidance scale: {args.guidance_scale}\n")
         f.write(f"Quantization: {precision}\n")
@@ -384,7 +370,6 @@ def main(args=None):
     
     print(f"Completed. Results saved to {generation_output_dir}")
     print(f"Summary report: {summary_file}")
-
 
 if __name__ == "__main__":
     main()
