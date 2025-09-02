@@ -38,3 +38,12 @@ python combined_optimization_coco.py --model_path "black-forest-labs/FLUX.1-dev"
 python combined_optimization_coco.py --model_path "Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers" --pruning_amount 0.3 --use_kv_cache --num_images 10 --steps 30
 
 python combination/combined_optimization_coco.py --model_path "black-forest-labs/FLUX.1-dev" --precision int4 --pruning_amount 0.3 --use_kv_cache --num_images 10 --steps 50 --monitor_vram
+
+python kvcache/sam_kvcache.py --coco_dir /coco --num_images 5 --benchmark --num_runs 5 --metrics_subset 20
+
+# Run by app.py
+rm -rf quantization/quant_outputs/coco/*
+python app.py --dataset_name "MSCOCO2017" --num_images 5 --inference_steps 50 --guidance_scale 3.5 --metrics_subset 5
+
+rm -rf quantization/quant_outputs/flickr8k/*
+python app.py --dataset_name "Flickr8k" --num_images 5 --inference_steps 50 --guidance_scale 3.5 --metrics_subset 5

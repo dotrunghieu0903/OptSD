@@ -102,7 +102,7 @@ def main():
                 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
                 
                 # Import the quantization module
-                from quantization.quant_coco import main as quantization_main
+                from quantization.quantized import main as quantization_main
                 quantization_main(module_args)
             except Exception as e:
                 print(f"Error when doing quantization module: {e}")
