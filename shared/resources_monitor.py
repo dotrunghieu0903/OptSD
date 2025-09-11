@@ -136,13 +136,13 @@ def generate_image_and_monitor(pipeline, prompt, output_path, filename, num_infe
 
     return generation_time, metadata # Return both generation time and metadata
 
-def write_generation_metadata_to_file(file_path):
+def write_generation_metadata_to_file(file_path, metadata = None):
     """
     Writes the collected generation metadata to a JSON file.
     """
     try:
         with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(generation_metadata, f, ensure_ascii=False, indent=4)
+            json.dump(generation_metadata if metadata is None else metadata, f, ensure_ascii=False, indent=4)
         print(f"Stored info to metadata: {file_path}")
     except Exception as e:
         print(f"Error when saving file metadata JSON: {e}")

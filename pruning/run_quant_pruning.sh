@@ -14,7 +14,8 @@ echo "Running combined quantization and pruning with COCO dataset..."
 rm -rf pruning/quant_pruning_outputs/*
 
 # Run with reduced steps for faster processing
-python pruning/quant_pruning_coco.py --pruning_amount 0.3 --num_images 5 --steps 50 --guidance_scale 3.5 --metrics_subset 5
+python pruning/quant_pruning.py --pruning_amount 0.3 --num_images 5 --steps 50 --guidance_scale 3.5 --metrics_subset 5
   # Remove the comment below to skip metrics calculation if needed
   # --skip_metrics
 
+python pruning/quant_pruning.py --pruning_amount 0.3 --num_images 1000 --steps 50 --guidance_scale 3.5 --metrics_subset 5 --use_flickr8k

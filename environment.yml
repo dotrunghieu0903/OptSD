@@ -9,7 +9,6 @@ dependencies:
       - torch==2.6
       - torchvision==0.21
       - torchaudio==2.6
-      - numpy==1.26.3
       - lpips
       - clean-fid==0.1.35
       - image-reward==1.5

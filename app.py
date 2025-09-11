@@ -76,7 +76,7 @@ def main():
                 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
                 
                 # Import the combined pruning and quantization module
-                from pruning.quant_pruning_coco import main as quant_pruning_main
+                from pruning.quant_pruning import main as quant_pruning_main
                 quant_pruning_main(module_args)
             except Exception as e:
                 print(f"Error when doing quant_pruning module: {e}")

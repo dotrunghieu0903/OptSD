@@ -1,17 +1,19 @@
 #!/bin/bash
 
-# Run advanced pruning COCO script
+# Run advanced pruning script
 # This script applies pruning to a diffusion model and evaluates on COCO dataset
 
-echo "Starting advanced pruning with COCO dataset..."
+echo "Starting advanced pruning with dataset..."
 
 # Default values
 PRUNING_METHOD="magnitude"  # Options: magnitude, structured, iterative, attention_heads
 PRUNING_AMOUNT=0.3          # Amount to prune (0.0 to 0.9)
-NUM_IMAGES=1000              # Number of images to generate
+NUM_IMAGES=500              # Number of images to generate
 INFERENCE_STEPS=50          # Number of inference steps
 GUIDANCE_SCALE=3.5          # Guidance scale for generation
 METRICS_SUBSET=50           # Number of images for metrics calculation
+USE_FLICKR8K=True           # Use Flickr8k dataset if set
+USE_COCO=True               # Use COCO dataset by default
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -39,6 +41,10 @@ while [[ $# -gt 0 ]]; do
     --metrics_subset)
       METRICS_SUBSET="$2"
       shift 2
+      ;;
+    --use_flickr8k)
+      USE_FLICKR8K=True
+      shift
       ;;
     --skip_metrics)
       SKIP_METRICS="--skip_metrics"
@@ -78,16 +84,29 @@ echo "  Output directory: $OUTPUT_DIR"
 echo "  Metrics subset: $METRICS_SUBSET"
 echo ""
 
-# Run the Python script with the specified arguments
-python pruning/advanced_pruning_coco.py \
-  --pruning_method "$PRUNING_METHOD" \
-  --pruning_amount "$PRUNING_AMOUNT" \
-  --num_images "$NUM_IMAGES" \
-  --steps "$INFERENCE_STEPS" \
-  --guidance_scale "$GUIDANCE_SCALE" \
-  --metrics_subset "$METRICS_SUBSET" \
-  --output_dir "$OUTPUT_DIR" \
-  $SKIP_METRICS
+
+# Build the command
+CMD="python pruning/advanced_pruning.py \
+  --pruning_method \"$PRUNING_METHOD\" \
+  --pruning_amount \"$PRUNING_AMOUNT\" \
+  --num_images \"$NUM_IMAGES\" \
+  --steps \"$INFERENCE_STEPS\" \
+  --guidance_scale \"$GUIDANCE_SCALE\" \
+  --metrics_subset \"$METRICS_SUBSET\" \
+  --output_dir \"$OUTPUT_DIR\""
+
+# Add --use_flickr8k flag if enabled
+if [ "$USE_FLICKR8K" = "True" ]; then
+  CMD="$CMD --use_flickr8k"
+fi
+
+# Add skip metrics if set
+if [ -n "$SKIP_METRICS" ]; then
+  CMD="$CMD $SKIP_METRICS"
+fi
+
+# Run the command
+eval $CMD
 
 # Check if the script executed successfully
 if [ $? -eq 0 ]; then
@@ -98,4 +117,4 @@ else
   exit 1
 fi
 
-# ./pruning/advanced_pruning_coco.sh
+# ./pruning/run_advanced_pruning.sh

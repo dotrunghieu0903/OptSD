@@ -34,10 +34,26 @@ rm flickr30k.zip
 ./quantization/run_quant.sh
 ./quantization/run_quant_flickr8k.sh
 
-python combined_optimization_coco.py --model_path "black-forest-labs/FLUX.1-dev" --precision int4 --pruning_amount 0.3 --use_kv_cache --num_images 1 --steps 25
-python combined_optimization_coco.py --model_path "Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers" --pruning_amount 0.3 --use_kv_cache --num_images 10 --steps 30
+python combined_optimization.py --model_path "black-forest-labs/FLUX.1-dev" --precision int4 --pruning_amount 0.3 --use_kv_cache --num_images 1 --steps 25
+python combined_optimization.py --model_path "Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers" --pruning_amount 0.3 --use_kv_cache --num_images 10 --steps 30
 
-python combination/combined_optimization_coco.py --model_path "black-forest-labs/FLUX.1-dev" --precision int4 --pruning_amount 0.3 --use_kv_cache --num_images 10 --steps 50 --monitor_vram
+python combination/combined_optimization.py --model_path "black-forest-labs/FLUX.1-dev" --precision int4 --pruning_amount 0.3 --use_kv_cache --num_images 10 --steps 50 --monitor_vram
+python combination/combined_optimization.py --model_path "Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers" --precision int4 --pruning_amount 0.3 --use_kv_cache --num_images 1000 --steps 50 --monitor_vram
+
+
+python combination/combined_optimization.py --model_path "black-forest-labs/FLUX.1-dev" --precision int4 --use_kv_cache --num_images 10 --steps 50 --monitor_vram
+python combination/combined_optimization.py --model_path "black-forest-labs/FLUX.1-dev" --use_kv_cache --num_images 10 --steps 50 --monitor_vram
+python combination/combined_optimization.py --model_path "black-forest-labs/FLUX.1-dev" --use_kv_cache --pruning_amount 0.0 --num_images 100 --steps 50 --monitor_vram --use_flickr8k
+python combination/combined_optimization.py --model_path "black-forest-labs/FLUX.1-dev" --use_kv_cache --pruning_amount 0.3 --num_images 200 --steps 50 --monitor_vram --use_flickr8k
+
+python combination/combined_optimization.py --model_path "black-forest-labs/FLUX.1-schnell" --precision int4 --use_kv_cache --num_images 10 --steps 50 --monitor_vram
+python combination/combined_optimization.py --model_path "black-forest-labs/FLUX.1-schnell" --use_kv_cache --num_images 10 --steps 50 --monitor_vram
+python combination/combined_optimization.py --model_path "black-forest-labs/FLUX.1-schnell" --use_kv_cache --pruning_amount 0.0 --num_images 100 --steps 50 --monitor_vram --use_flickr8k
+python combination/combined_optimization.py --model_path "black-forest-labs/FLUX.1-schnell" --use_kv_cache --pruning_amount 0.3 --num_images 500 --steps 50 --monitor_vram --use_flickr8k
+python combination/combined_optimization.py --model_path "black-forest-labs/FLUX.1-schnell" --pruning_amount 0.3 --num_images 500 --steps 50 --monitor_vram --use_flickr8k
+
+python combination/combined_optimization.py --model_path "Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers" --use_kv_cache --num_images 10 --steps 50 --monitor_vram --use_flickr8k
+python combination/combined_optimization.py --model_path "Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers" --pruning_amount 0.3 --use_kv_cache --num_images 10 --steps 50 --monitor_vram --use_flickr8k
 
 python kvcache/sam_kvcache.py --coco_dir /coco --num_images 5 --benchmark --num_runs 5 --metrics_subset 20
 

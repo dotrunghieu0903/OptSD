@@ -6,6 +6,7 @@ import time
 import json
 import os
 import sys
+
 import torch
 import numpy as np
 from PIL import Image
@@ -13,23 +14,20 @@ from tqdm import tqdm
 from diffusers import DiffusionPipeline
 from huggingface_hub import login
 import threading
+from nunchaku import NunchakuSanaTransformer2DModel, NunchakuFluxTransformer2dModel
 
 # Add the project root to the path to access shared modules
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from metrics import calculate_clip_score, calculate_fid, calculate_lpips, calculate_psnr_resized, compute_image_reward
-from resizing_image import resize_images
+from shared.resizing_image import resize_images
 from shared.resources_monitor import generate_image_and_monitor, monitor_vram, write_generation_metadata_to_file
+from shared.cleanup import setup_memory_optimizations
+from dataset.coco import process_coco
+from dataset.flickr8k import process_flickr8k
 
 # A list to store VRAM usage samples (to be used by monitor_vram_detailed)
 vram_samples = []
 stop_monitoring = threading.Event()
-
-# Memory utilities for optimization
-def setup_memory_optimizations():
-    """Apply memory optimizations to avoid CUDA OOM errors"""
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    gc.collect()
 
 class KVCacheTransformer(torch.nn.Module):
     """Transformer model with Key-Value caching for transformer blocks
@@ -371,7 +369,6 @@ class KVCacheTransformer(torch.nn.Module):
                     print(f"Error with only args: {e3}")
                     raise e  # Ném ngoại lệ ban đầu
 
-
 class OptimizedSANAPipeline:
     """Pipeline for SANA model with KV caching optimization
     
@@ -425,8 +422,12 @@ class OptimizedSANAPipeline:
                 print("Available components:", list(self.pipeline.components.keys()))
                 
             # Tìm thành phần transformer
-            transformer = self._locate_transformer()
-            
+            # transformer = self._locate_transformer()
+            model_path = "nunchaku-tech/nunchaku-sana/svdq-int4_r32-sana1.6b.safetensors"
+            transformer = NunchakuSanaTransformer2DModel.from_pretrained(model_path, offload=True)
+            # model_path = "nunchaku-tech/nunchaku-flux.1-dev/svdq-int4_r32-flux.1-dev.safetensors"
+            # transformer = NunchakuFluxTransformer2dModel.from_pretrained(model_path, offload=True)
+
             # Tạo transformer có KV cache
             self.kv_cached_transformer = KVCacheTransformer(transformer)
             
@@ -488,9 +489,9 @@ class OptimizedSANAPipeline:
                                 if not model_attr.startswith("_"):
                                     try:
                                         model_attr_value = getattr(attr_value, model_attr)
-                                        print(f"    - {model_attr} ({type(model_attr_value).__name__})")
+                                        print(f"- {model_attr} ({type(model_attr_value).__name__})")
                                     except:
-                                        print(f"    - {model_attr} (error getting type)")
+                                        print(f"- {model_attr} (error getting type)")
                     except:
                         print(f"- {attr} (error accessing)")
             
@@ -630,7 +631,7 @@ class OptimizedSANAPipeline:
         # Kiểm tra loại của pipeline
         pipeline_type = self.pipeline_type.lower()
         is_sana_sprint = "sanasprint" in pipeline_type
-        
+
         # Chuẩn bị các tham số cơ bản
         kwargs = {
             "prompt": prompt,
@@ -715,16 +716,6 @@ class OptimizedSANAPipeline:
                 
             except Exception as e:
                 print(f"Error with {method_name}: {str(e)}")
-                
-                # Nếu đã thử tất cả phương pháp
-                if attempt == 3:
-                    # In thông tin debug
-                    print("\n=== Debug Information ===")
-                    print(f"Pipeline type: {self.pipeline_type}")
-                    print(f"Available components: {list(self.pipeline.components.keys()) if hasattr(self.pipeline, 'components') else 'N/A'}")
-                    print(f"KV cached transformer structure: {str(self.kv_cached_transformer.transformer_structure)[:500]}...")
-                    
-                    raise RuntimeError(f"Failed to generate image after all attempts: {e}")
                     
         # Khôi phục trạng thái ban đầu của use_kv_cache nếu đã thay đổi
         if hasattr(self.kv_cached_transformer, "use_kv_cache") and 'prev_use_cache' in locals():
@@ -737,7 +728,7 @@ class OptimizedSANAPipeline:
         
         return image, generation_time
     
-    def generate_images_with_coco(self, image_filename_to_caption, output_dir, num_images=10, 
+    def generate_images_with_dataset(self, image_filename_to_caption, generated_output_dir, num_images=10, 
                                  num_inference_steps=30, guidance_scale=7.5, use_cache=True):
         """
         Generate images using captions from COCO dataset
@@ -754,7 +745,7 @@ class OptimizedSANAPipeline:
             generation_times: Dictionary mapping filenames to generation times
             generation_metadata: List of metadata for each generated image
         """
-        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(generated_output_dir, exist_ok=True)
         
         # Limit the number of images to generate
         filenames_captions = list(image_filename_to_caption.items())[:num_images]
@@ -763,8 +754,8 @@ class OptimizedSANAPipeline:
         generation_metadata = []
         
         # Generate images for each caption
-        for i, (filename, prompt) in enumerate(tqdm(filenames_captions, desc="Generating images with COCO captions")):
-            output_path = os.path.join(output_dir, filename)
+        for i, (filename, prompt) in enumerate(tqdm(filenames_captions, desc="Generating images with captions of datasets")):
+            output_path = os.path.join(generated_output_dir, filename)
             
             print(f"\n\n{'='*80}")
             print(f"Processing image {i+1}/{len(filenames_captions)}: {filename}")
@@ -1152,53 +1143,6 @@ class OptimizedSANAPipeline:
                 except:
                     print("Failed to generate image with this prompt.")
 
-
-def preprocessing_coco(annotations_dir):
-    """
-    Load COCO captions and image dimensions from annotations
-    
-    Args:
-        annotations_dir: Directory containing COCO annotations
-        
-    Returns:
-        image_filename_to_caption: Dictionary mapping image filenames to captions
-        image_dimensions: Dictionary mapping image filenames to dimensions (width, height)
-        image_id_to_dimensions: Dictionary mapping image IDs to (width, height, filename)
-    """
-    # Path to the captions annotation file
-    captions_file = os.path.join(annotations_dir, 'captions_val2017.json')
-
-    # Load the captions data
-    with open(captions_file, 'r') as f:
-        captions_data = json.load(f)
-
-    # Build dictionary mapping image_id to size
-    image_id_to_dimensions = {img['id']: (img['width'], img['height'], img['file_name'])
-                            for img in captions_data['images']}
-
-    print(f"Read {len(captions_data['annotations'])} captions from COCO annotation file...")
-    # To ensure each original image is processed only once for the main prompt purpose
-    processed_image_ids = set()
-
-    image_filename_to_caption = {}
-    # Store {filename: (width, height)}
-    image_dimensions = {}
-    # Create a dictionary to store captions by image ID
-    for annotation in captions_data['annotations']:
-        image_id = annotation['image_id']
-        caption = annotation['caption']
-
-        if image_id in image_id_to_dimensions and image_id not in processed_image_ids:
-            width, height, original_filename = image_id_to_dimensions[image_id]
-            image_filename_to_caption[original_filename] = caption
-            image_dimensions[original_filename] = (width, height)
-            processed_image_ids.add(image_id)
-
-    print(f"Extracted captions for {len(processed_image_ids)} images.")
-    print(f"Created mapping for {len(image_filename_to_caption)} images.")
-    print(f"Extracted dimensions for {len(image_dimensions)} images from annotations.")
-    return image_filename_to_caption, image_dimensions, image_id_to_dimensions
-
 def load_config():
     """Load configuration from config.json"""
     try:
@@ -1336,36 +1280,12 @@ def load_model_with_fallbacks(model_path=None):
     
     # Khởi tạo pipeline
     try:
-        pipeline = OptimizedSANAPipeline(model_path=model_path)
+        pipeline = OptimizedSANAPipeline(model_path="Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers")
         print("Model loaded successfully!")
         return pipeline
     except Exception as e:
         print(f"Error loading model: {e}")
         
-        # Cố gắng thử lại với cấu hình khác
-        try:
-            print("\nTrying to load with alternative configuration...")
-            
-            # Tải pipeline thông thường không có KV cache
-            print("Loading standard diffusion pipeline...")
-            pipeline = DiffusionPipeline.from_pretrained(
-                model_path,
-                torch_dtype=torch.float16,  # Thử với float16 thay vì bfloat16
-                use_safetensors=True,
-            )
-            pipeline = pipeline.to("cuda")
-            
-            # Hiển thị thông tin về pipeline đã tải
-            print(f"Loaded pipeline type: {type(pipeline).__name__}")
-            if hasattr(pipeline, 'components'):
-                print(f"Components: {list(pipeline.components.keys())}")
-            
-            print("\nKV caching not applied due to initialization error")
-            return pipeline
-        except Exception as e2:
-            print(f"Failed to load with alternative configuration: {e2}")
-            raise RuntimeError(f"Could not load SANA model after multiple attempts: {e}")
-
 def monitor_generation_vram(pipeline, prompt, use_cache=True, num_inference_steps=30, guidance_scale=7.5, 
                     height=1024, width=1024, negative_prompt="", seed=None):
     """
@@ -1537,11 +1457,12 @@ def main():
                         help="Path to the SANA model")
     parser.add_argument("--debug", action="store_true",
                         help="Enable debug mode with extra logging")
-    # Add COCO-specific arguments
     parser.add_argument("--use_coco", action="store_true",
                         help="Use COCO dataset captions for image generation")
+    parser.add_argument("--use_flickr8k", action="store_true",
+                        help="Use Flickr8k dataset captions for image generation")
     parser.add_argument("--num_images", type=int, default=10,
-                        help="Number of COCO images to process when --use_coco is enabled")
+                        help="Number of images to process")
     parser.add_argument("--skip_metrics", action="store_true",
                         help="Skip calculation of image quality metrics")
     parser.add_argument("--metrics_subset", type=int, default=20,
@@ -1564,7 +1485,12 @@ def main():
         # Tải model với cơ chế dự phòng
         pipeline = load_model_with_fallbacks(model_path=args.model_path)
         
-        # Xác định chế độ chạy
+        # Create a list to store generation metadata
+        generation_metadata = []
+
+        # Keep track of generation time
+        generation_times = {}
+        
         if args.use_coco:
             # Using COCO dataset for image generation
             print("\n=== Running with COCO dataset ===")
@@ -1581,7 +1507,7 @@ def main():
             
             # Process COCO dataset to get captions
             print("\n=== Loading COCO Captions ===")
-            image_filename_to_caption, image_dimensions, image_id_to_dimensions = preprocessing_coco(annotations_dir)
+            image_filename_to_caption, image_dimensions, _ = process_coco(annotations_dir)
             
             # Create output directories
             generation_output_dir = "kvcache/outputs/coco"
@@ -1592,15 +1518,9 @@ def main():
             os.makedirs(resized_output_dir, exist_ok=True)
             print(f"Created directory for resized generated images: {resized_output_dir}")
             
-            # Create a list to store generation metadata
-            generation_metadata = []
-            
             # Limit the number of images to generate
             num_images_to_generate = min(args.num_images, len(image_filename_to_caption))
             print(f"\n=== Will generate {num_images_to_generate} images ===")
-            
-            # Keep track of generation time
-            generation_times = {}
             
             # Generate images for COCO captions
             for i, (filename, prompt) in enumerate(tqdm(list(image_filename_to_caption.items())[:num_images_to_generate], desc="Generating images")):
@@ -1666,7 +1586,7 @@ def main():
             print("Image generation complete.")
             
             # Save generation metadata
-            metadata_file = os.path.join(generation_output_dir, "sana_kvcache_metadata.json")
+            metadata_file = os.path.join(generation_output_dir, "sana_kvcache_coco_metadata.json")
             # write_generation_metadata_to_file(metadata_file)
             try:
                 with open(metadata_file, 'w', encoding='utf-8') as f:
@@ -1722,20 +1642,12 @@ def main():
                 # Print VRAM statistics
                 print("\n=== VRAM Usage Statistics ===")
                 print(f"Generation time: {vram_stats['generation_time_seconds']:.2f} seconds")
-                print(f"Average VRAM usage: {vram_stats.get('average_vram_gb', 'N/A'):.2f} GB")
+                avg_vram = vram_stats.get('average_vram_gb', 'N/A')
+                print(f"Average VRAM usage: {avg_vram:.2f} GB" if isinstance(avg_vram, (int, float)) else f"Average VRAM usage: {avg_vram} GB")
                 print(f"Peak VRAM usage: {vram_stats.get('peak_vram_gb', 'N/A'):.2f} GB")
                 print(f"Initial VRAM usage: {vram_stats.get('initial_vram_gb', 'N/A'):.2f} GB")
                 print(f"VRAM increase: {vram_stats.get('vram_increase_gb', 'N/A'):.2f} GB")
-                
-                # Save VRAM statistics to a file
-                # vram_stats_file = f"vram_stats_{int(time.time())}.json"
-                # try:
-                #     with open(vram_stats_file, 'w', encoding='utf-8') as f:
-                #         json.dump(vram_stats, f, ensure_ascii=False, indent=4)
-                #     print(f"VRAM statistics saved to {vram_stats_file}")
-                # except Exception as e:
-                #     print(f"Error saving VRAM statistics: {e}")
-                
+                              
                 # Print summary of metrics
                 print("\n=== Metrics Summary ===")
                 for metric, value in metrics_results.items():
@@ -1745,7 +1657,7 @@ def main():
                         print(f"{metric}: N/A")
             
                 # Save summary report
-                summary_file = os.path.join(generation_output_dir, "sana_kvcache_summary.txt")
+                summary_file = os.path.join(generation_output_dir, "sana_kvcache_coco_summary.txt")
                 with open(summary_file, "w", encoding="utf-8") as f:
                     f.write("=== SANA KV-Cache Generation Summary ===\n\n")
                     f.write(f"Processed {num_images_to_generate} COCO captions\n")
@@ -1774,73 +1686,272 @@ def main():
                 print(f"\nCompleted COCO image generation. Results saved to {generation_output_dir}")
                 print(f"Summary report: {summary_file}")
             else:
-                print("\n=== Skipping Image Quality Metrics (--skip_metrics flag set) ===")  
-        
-        elif args.benchmark:
-            # Chạy benchmark
-            if hasattr(pipeline, 'benchmark'):
-                pipeline.benchmark(
-                    prompt=args.prompt,
-                    negative_prompt=args.negative_prompt,
-                    num_inference_steps=args.steps,
-                    guidance_scale=args.guidance_scale,
-                    num_runs=args.num_runs,
-                    height=args.height,
-                    width=args.width
+                print("\n=== Skipping Image Quality Metrics (--skip_metrics flag set) ===") 
+            
+        elif args.use_flickr8k:
+            # Using Flickr8k dataset for image generation
+            print("\n=== Running with Flickr8k dataset ===")
+            
+            # Define paths
+            flickr8k_dir = "flickr8k"
+            images_dir = os.path.join(flickr8k_dir, "Images")
+            captions_file = os.path.join(flickr8k_dir, "captions.txt")
+            
+            # Check if Flickr8k dataset is available
+            if not os.path.exists(images_dir) or not os.path.exists(captions_file):
+                print("Flickr8k dataset not found. Please download it first.")
+                return
+            
+            # Process Flickr8k dataset to get captions
+            print("\n=== Loading Flickr8k Captions ===")
+            image_filename_to_caption, image_dimensions = process_flickr8k(images_dir, captions_file)
+            
+            # Create output directories
+            generation_output_dir = "kvcache/outputs/flickr8k"
+            os.makedirs(generation_output_dir, exist_ok=True)
+            print(f"Created directory for generated images: {generation_output_dir}")
+            
+            resized_output_dir = os.path.join(generation_output_dir, "resized")
+            os.makedirs(resized_output_dir, exist_ok=True)
+            print(f"Created directory for resized generated images: {resized_output_dir}")
+            
+            # Create a list to store generation metadata
+            generation_metadata = []
+            
+            # Limit the number of images to generate
+            num_images_to_generate = min(args.num_images, len(image_filename_to_caption))
+            print(f"\n=== Will generate {num_images_to_generate} images ===")
+
+        # Generate images for flickr8k captions
+            for i, (filename, prompt) in enumerate(tqdm(list(image_filename_to_caption.items())[:num_images_to_generate], desc="Generating images")):
+                output_path = os.path.join(generation_output_dir, filename)
+                
+                print(f"\n\n{'='*80}")
+                print(f"Processing image {i+1}/{num_images_to_generate}: {filename} (Prompt: {prompt[:50]}...)")
+                print(f"Output will be saved to: {output_path}")
+                print(f"{'='*80}")
+                
+                # Skip if the image already exists
+                if os.path.exists(output_path):
+                    print(f"Skipping generation for {filename} (already exists)")
+                    continue
+                    
+                try:
+                    # Generate image and monitor VRAM
+                    # For KV-cached model, we need to use the specialized API
+                    if hasattr(pipeline, 'generate_image'):
+                        image, generation_time = pipeline.generate_image(
+                            prompt=prompt,
+                            num_inference_steps=args.steps,
+                            guidance_scale=args.guidance_scale,
+                            use_cache=True
+                        )
+                        image.save(output_path)
+                        
+                        # Create metadata
+                        metadata = {
+                            "generated_image_path": output_path,
+                            "original_filename": filename,
+                            "caption_used": prompt,
+                            "generation_time": generation_time,
+                            "guidance_scale": args.guidance_scale,
+                            "num_steps": args.steps
+                        }
+                        
+                        generation_metadata.append(metadata)
+                        generation_times[filename] = generation_time
+                    else:
+                        # Use the resources monitor for standard pipeline
+                        generation_time, metadata = pipeline.generate_image(
+                            prompt=prompt,
+                            num_inference_steps=args.steps,
+                            guidance_scale=args.guidance_scale,
+                            use_cache=True
+                        )
+                        generation_metadata.append(metadata)
+                        generation_times[filename] = generation_time
+                    
+                    print(f"Generated image {i+1}/{num_images_to_generate}: {filename}")
+                    print(f"Image available at: {output_path}")
+                    print(f"{'='*80}\n")
+                except Exception as e:
+                    print(f"Error when generating image for prompt '{prompt[:50]}...': {e}")
+                    generation_times[filename] = -1  # Indicate an error
+                    
+                # Force GC to free memory
+                if i % 5 == 0:
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                    
+            print("Image generation complete.")
+            
+            # Save generation metadata
+            metadata_file = os.path.join(generation_output_dir, "sana_kvcache_flickr8k_metadata.json")
+            # write_generation_metadata_to_file(metadata_file)
+            try:
+                with open(metadata_file, 'w', encoding='utf-8') as f:
+                    json.dump(generation_metadata, f, ensure_ascii=False, indent=4)
+                print(f"Stored info to metadata: {metadata_file}")
+            except Exception as e:
+                print(f"Error when saving file metadata JSON: {e}")
+            print(f"Stored generation metadata to: {metadata_file}")
+            
+            # Calculate and print average generation time
+            successful_generations = [t for t in generation_times.values() if t > 0]
+            print(f"\nGenerated {len(successful_generations)}/{num_images_to_generate} images successfully.")
+            if successful_generations:
+                avg_time = sum(successful_generations) / len(successful_generations)
+                print(f"Average generation time per image: {avg_time:.2f} seconds")
+            
+            # Resize images for comparison
+            try:
+                print("\n=== Resizing Images ===")
+                resize_images(generation_output_dir, resized_output_dir, image_dimensions)
+                print("Image resizing complete.")
+            except Exception as e:
+                print(f"Error resizing images: {e}")
+            
+            # Calculate metrics if not skipped
+            if not args.skip_metrics:
+                print("\n=== Calculating Image Quality Metrics ===")
+                metrics_results = evaluate_model_metrics(
+                    generation_output_dir,
+                    resized_output_dir,
+                    images_dir,
+                    image_filename_to_caption,
+                    image_dimensions,
+                    args.metrics_subset
                 )
-            else:
-                print("Benchmark mode not available for this pipeline")
                 
-        elif args.interactive:
-            # Chế độ tương tác
-            if hasattr(pipeline, 'interactive_session'):
-                pipeline.interactive_session(
-                    initial_prompt=args.prompt,
-                    negative_prompt=args.negative_prompt,
-                    num_inference_steps=args.steps,
-                    guidance_scale=args.guidance_scale,
-                    height=args.height,
-                    width=args.width
-                )
-            else:
-                print("Interactive mode not available for this pipeline")
-                
-        else:
-            # Sinh một ảnh
-            start_time = time.time()
-                
-            # Kiểm tra nếu đây là pipeline thông thường hay pipeline tùy chỉnh
-            if hasattr(pipeline, 'generate_image'):
-                image, _ = pipeline.generate_image(
+            # Check if VRAM monitoring is requested
+            if args.monitor_vram:
+                print("\n=== Running with VRAM monitoring ===")
+                # Run with VRAM monitoring
+                vram_stats = monitor_generation_vram(
+                    pipeline=pipeline,
                     prompt=args.prompt,
                     negative_prompt=args.negative_prompt,
                     num_inference_steps=args.steps,
                     guidance_scale=args.guidance_scale,
                     seed=args.seed,
                     height=args.height,
-                    width=args.width
-                )
-            else:
-                # Sử dụng cách gọi tiêu chuẩn nếu không có generate_image
-                generator = None if args.seed is None else torch.Generator("cuda").manual_seed(args.seed)
-                
-                output = pipeline(
-                    prompt=args.prompt,
-                    negative_prompt=args.negative_prompt,
-                    num_inference_steps=args.steps,
-                    guidance_scale=args.guidance_scale,
-                    height=args.height,
                     width=args.width,
-                    generator=generator
+                    use_cache=True  # Default to using KV cache
                 )
                 
-                image = output.images[0]
-                print(f"Image generated in {time.time() - start_time:.2f} seconds")
+                # Print VRAM statistics
+                print("\n=== VRAM Usage Statistics ===")
+                print(f"Generation time: {vram_stats['generation_time_seconds']:.2f} seconds")
+                print(f"Average VRAM usage: {vram_stats.get('average_vram_gb', 'N/A'):.2f} GB")
+                print(f"Peak VRAM usage: {vram_stats.get('peak_vram_gb', 'N/A'):.2f} GB")
+                print(f"Initial VRAM usage: {vram_stats.get('initial_vram_gb', 'N/A'):.2f} GB")
+                print(f"VRAM increase: {vram_stats.get('vram_increase_gb', 'N/A'):.2f} GB")
+                              
+                # Print summary of metrics
+                print("\n=== Metrics Summary ===")
+                for metric, value in metrics_results.items():
+                    if value is not None:
+                        print(f"{metric}: {value:.4f}")
+                    else:
+                        print(f"{metric}: N/A")
             
-            # Lưu ảnh
-            output_filename = f"output_{int(time.time())}.png"
-            image.save(output_filename)
-            print(f"Image saved as {output_filename}")
+                # Save summary report
+                summary_file = os.path.join(generation_output_dir, "sana_kvcache_flickr8k_summary.txt")
+                with open(summary_file, "w", encoding="utf-8") as f:
+                    f.write("=== SANA KV-Cache Generation Summary ===\n\n")
+                    f.write(f"Processed {num_images_to_generate} COCO captions\n")
+                    f.write(f"Inference steps: {args.steps}\n")
+                    f.write(f"Guidance scale: {args.guidance_scale}\n")
+                    
+                    if successful_generations:
+                        f.write(f"\nGeneration Statistics:\n")
+                        f.write(f"Successfully generated {len(successful_generations)}/{num_images_to_generate} images\n")
+                        f.write(f"Average generation time: {avg_time:.2f} seconds per image\n")
+                        f.write(f"Total generation time: {sum(successful_generations):.2f} seconds\n")
+                        # Add VRAM usage to summary
+                        if args.monitor_vram and vram_stats:
+                            f.write(f"\nVRAM Usage Statistics:\n")
+                            f.write(f"Average VRAM usage: {vram_stats.get('average_vram_gb', 'N/A'):.2f} GB\n")
+                            f.write(f"Peak VRAM usage: {vram_stats.get('peak_vram_gb', 'N/A'):.2f} GB\n")
+                            f.write(f"Initial VRAM usage: {vram_stats.get('initial_vram_gb', 'N/A'):.2f} GB\n")
+                            f.write(f"VRAM increase: {vram_stats.get('vram_increase_gb', 'N/A'):.2f} GB\n")
+                    # Add metrics results to summary
+                    if metrics_results:
+                        f.write("\n=== Image Quality Metrics ===\n")
+                        for metric_name, metric_value in metrics_results.items():
+                            if metric_value is not None:
+                                f.write(f"{metric_name.upper()}: {metric_value:.4f}\n")
+                                
+                print(f"\nCompleted COCO image generation. Results saved to {generation_output_dir}")
+                print(f"Summary report: {summary_file}")
+            else:
+                print("\n=== Skipping Image Quality Metrics (--skip_metrics flag set) ===") 
+  
+        # elif args.benchmark:
+        #     # Chạy benchmark
+        #     if hasattr(pipeline, 'benchmark'):
+        #         pipeline.benchmark(
+        #             prompt=args.prompt,
+        #             negative_prompt=args.negative_prompt,
+        #             num_inference_steps=args.steps,
+        #             guidance_scale=args.guidance_scale,
+        #             num_runs=args.num_runs,
+        #             height=args.height,
+        #             width=args.width
+        #         )
+        #     else:
+        #         print("Benchmark mode not available for this pipeline")
+                
+        # elif args.interactive:
+        #     # Chế độ tương tác
+        #     if hasattr(pipeline, 'interactive_session'):
+        #         pipeline.interactive_session(
+        #             initial_prompt=args.prompt,
+        #             negative_prompt=args.negative_prompt,
+        #             num_inference_steps=args.steps,
+        #             guidance_scale=args.guidance_scale,
+        #             height=args.height,
+        #             width=args.width
+        #         )
+        #     else:
+        #         print("Interactive mode not available for this pipeline")
+                
+        # else:
+        #     # Sinh một ảnh
+        #     start_time = time.time()
+                
+        #     # Kiểm tra nếu đây là pipeline thông thường hay pipeline tùy chỉnh
+        #     if hasattr(pipeline, 'generate_image'):
+        #         image, _ = pipeline.generate_image(
+        #             prompt=args.prompt,
+        #             negative_prompt=args.negative_prompt,
+        #             num_inference_steps=args.steps,
+        #             guidance_scale=args.guidance_scale,
+        #             seed=args.seed,
+        #             height=args.height,
+        #             width=args.width
+        #         )
+        #     else:
+        #         # Sử dụng cách gọi tiêu chuẩn nếu không có generate_image
+        #         generator = None if args.seed is None else torch.Generator("cuda").manual_seed(args.seed)
+                
+        #         output = pipeline(
+        #             prompt=args.prompt,
+        #             negative_prompt=args.negative_prompt,
+        #             num_inference_steps=args.steps,
+        #             guidance_scale=args.guidance_scale,
+        #             height=args.height,
+        #             width=args.width,
+        #             generator=generator
+        #         )
+                
+        #         image = output.images[0]
+        #         print(f"Image generated in {time.time() - start_time:.2f} seconds")
+            
+        #     # Lưu ảnh
+        #     output_filename = f"output_{int(time.time())}.png"
+        #     image.save(output_filename)
+        #     print(f"Image saved as {output_filename}")
             
     except Exception as e:
         # 4. Sửa lỗi chung - Hiển thị thông báo lỗi chi tiết

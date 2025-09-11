@@ -62,4 +62,7 @@ conda activate optsd && python kvcache/sana_kvcache.py --prompt "A girl going in
 #   --num_runs 1
 rm -rf kvcache/outputs/*
 
-conda activate optsd && python kvcache/sana_kvcache.py --use_coco --num_images 1000 --steps 25 --guidance_scale 3.5 --metrics_subset 5 --monitor_vram
+conda activate optsd
+python kvcache/sana_kvcache.py --use_coco --num_images 1000 --steps 50 --guidance_scale 3.5 --metrics_subset 5 --monitor_vram
+
+python kvcache/sana_kvcache.py --use_flickr8k --num_images 1000 --steps 50 --guidance_scale 3.5 --metrics_subset 5 --monitor_vram

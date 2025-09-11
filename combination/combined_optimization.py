@@ -12,6 +12,9 @@ image quality metrics: FID, CLIP Score, ImageReward, LPIPS, and PSNR.
 
 import os
 import sys
+
+# Add the project root directory to the Python path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import gc
 import json
 import time
@@ -20,6 +23,7 @@ import random
 import itertools
 import threading
 import numpy as np
+from shared.cleanup import setup_memory_optimizations_pruning
 import torch
 from tqdm import tqdm
 from PIL import Image
@@ -31,19 +35,20 @@ except ImportError:
     HAVE_PYNVML = False
 
 import torch
-from diffusers import DiffusionPipeline, FluxPipeline
+from diffusers import DiffusionPipeline, FluxPipeline, SanaPipeline
 from huggingface_hub import login
 
 # Add parent directory to path for importing modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.resources_monitor import generate_image_and_monitor, monitor_vram, write_generation_metadata_to_file
 from metrics import calculate_fid, compute_image_reward, calculate_clip_score, calculate_lpips, calculate_psnr_resized
-from resizing_image import resize_images
+from shared.resizing_image import resize_images
+from dataset.flickr8k import process_flickr8k
 
 # Try to import model-specific modules
 try:
     # First try to import quantization modules
-    from nunchaku import NunchakuFluxTransformer2dModel
+    from nunchaku import NunchakuFluxTransformer2dModel, NunchakuSanaTransformer2DModel
     from nunchaku.utils import get_precision
     HAS_NUNCHAKU = True
 except ImportError:
@@ -105,35 +110,6 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 # Global variables for VRAM monitoring
 vram_samples = []
 stop_monitoring = threading.Event()
-
-# ======================================================================
-# MEMORY AND OPTIMIZATION UTILITIES
-# ======================================================================
-
-def setup_memory_optimizations():
-    """
-    Configure memory optimizations for PyTorch to avoid CUDA OOM errors.
-    """
-    # Clear any cached memory
-    torch.cuda.empty_cache()
-    gc.collect()
-    
-    # Print available GPU memory for debugging
-    if torch.cuda.is_available():
-        device = torch.cuda.current_device()
-        gpu_properties = torch.cuda.get_device_properties(device)
-        total_memory = gpu_properties.total_memory / (1024 ** 3)
-        allocated_memory = torch.cuda.memory_allocated(device) / (1024 ** 3)
-        reserved_memory = torch.cuda.memory_reserved(device) / (1024 ** 3)
-        print(f"GPU: {gpu_properties.name}")
-        print(f"Total GPU memory: {total_memory:.2f} GiB")
-        print(f"Allocated GPU memory: {allocated_memory:.2f} GiB")
-        print(f"Reserved GPU memory: {reserved_memory:.2f} GiB")
-        print(f"Free GPU memory: {total_memory - allocated_memory:.2f} GiB")
-    
-    # Set memory fraction to avoid OOM
-    if hasattr(torch.cuda, 'set_per_process_memory_fraction'):
-        torch.cuda.set_per_process_memory_fraction(0.9)
 
 # ======================================================================
 # KV CACHE IMPLEMENTATION
@@ -512,16 +488,18 @@ class OptimizedDiffusionPipeline:
         print(f"Loading model from {self.model_path}...")
         
         # Apply memory optimizations
-        setup_memory_optimizations()
+        setup_memory_optimizations_pruning()
         
         # Detect if this is a FLUX model or other type of model
         is_flux_model = "flux" in self.model_path.lower()
         
         # Step 1: Load model with quantization if applicable
         try:
-            if is_flux_model and HAS_NUNCHAKU:
+            # if is_flux_model and HAS_NUNCHAKU:
+            print(f"Nunchaku available: {HAS_NUNCHAKU}")
+            if HAS_NUNCHAKU:
                 # Load quantized FLUX model
-                transformer, self.precision = self._load_quantized_flux_model()
+                transformer, self.precision = self._load_quantized_model()
                 quantized_size = get_model_size(transformer)
                 print(f"Quantized model size: {quantized_size:.2f} MB")
                 
@@ -533,10 +511,14 @@ class OptimizedDiffusionPipeline:
                     print(f"Pruned model size: {pruned_size:.2f} MB")
                     print(f"Size reduction: {(1 - pruned_size/quantized_size) * 100:.2f}%")
                 
+                # pipe_path = "black-forest-labs/FLUX.1-dev"
+                pipe_path = "black-forest-labs/FLUX.1-schnell"
+                # pipe_path = "Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers"
                 # Create FLUX pipeline
+                # self.pipeline = SanaPipeline.from_pretrained(
                 self.pipeline = FluxPipeline.from_pretrained(
-                    "black-forest-labs/FLUX.1-dev",
-                    transformer=transformer,
+                    pipe_path,
+                    # transformer=transformer,
                     torch_dtype=torch.bfloat16,
                     low_cpu_mem_usage=True
                 ).to("cuda")
@@ -619,7 +601,7 @@ class OptimizedDiffusionPipeline:
             print(f"Error loading model: {e}")
             raise
 
-    def _load_quantized_flux_model(self):
+    def _load_quantized_model(self):
         """Load FLUX model with quantization
         
         Returns:
@@ -643,16 +625,16 @@ class OptimizedDiffusionPipeline:
         print(f"Loading model with {precision} quantization...")
         
         # Construct model path based on precision
-        model_path = f"mit-han-lab/svdq-{precision}-flux.1-dev"
+        # model_path = f"mit-han-lab/svdq-{precision}-flux.1-dev"
+        # model_path = f"nunchaku-tech/nunchaku-flux.1-dev/svdq-{precision}_r32-flux.1-dev.safetensors"
+        model_path = f"nunchaku-tech/nunchaku-flux.1-schnell/svdq-{precision}_r32-flux.1-schnell.safetensors"
+        # model_path = f"nunchaku-tech/nunchaku-sana/svdq-{precision}_r32-sana1.6b.safetensors"
         
         try:
             transformer = NunchakuFluxTransformer2dModel.from_pretrained(model_path, offload=True)
+            # transformer = NunchakuSanaTransformer2DModel.from_pretrained(model_path, offload=True)
         except Exception as e:
             print(f"Error loading model with precision {precision}: {e}")
-            print("Falling back to int4 precision...")
-            model_path = "mit-han-lab/svdq-int4-flux.1-dev"
-            transformer = NunchakuFluxTransformer2dModel.from_pretrained(model_path, offload=True)
-            precision = "int4"
         
         return transformer, precision
     
@@ -945,7 +927,7 @@ class OptimizedDiffusionPipeline:
         
         return image, generation_time
     
-    def generate_images_with_coco(self, image_filename_to_caption, output_dir, num_images=10, 
+    def generate_images_with_dataset(self, image_filename_to_caption, output_dir, num_images=10, 
                                  num_inference_steps=30, guidance_scale=7.5, use_cache=True):
         """
         Generate images using captions from COCO dataset
@@ -962,8 +944,6 @@ class OptimizedDiffusionPipeline:
             generation_times: Dictionary mapping filenames to generation times
             generation_metadata: List of metadata for each generated image
         """
-        os.makedirs(output_dir, exist_ok=True)
-        
         # Limit the number of images to generate
         filenames_captions = list(image_filename_to_caption.items())[:num_images]
         
@@ -971,7 +951,7 @@ class OptimizedDiffusionPipeline:
         generation_metadata = []
         
         # Generate images for each caption
-        for i, (filename, prompt) in enumerate(tqdm(filenames_captions, desc="Generating images with COCO captions")):
+        for i, (filename, prompt) in enumerate(tqdm(filenames_captions, desc="Generating images with captions")):
             output_path = os.path.join(output_dir, filename)
             
             print(f"\n\n{'='*80}")
@@ -1355,6 +1335,11 @@ def main():
     # Monitoring parameters
     parser.add_argument("--monitor_vram", action="store_true",
                         help="Monitor VRAM usage during image generation")
+    parser.add_argument("--use_coco", action="store_true",
+                        help="Use COCO dataset captions for image generation")
+    parser.add_argument("--use_flickr8k", action="store_true",
+                        help="Use Flickr8k dataset captions for image generation")
+    args = parser.parse_args()
     
     # Parse arguments
     args = parser.parse_args()
@@ -1363,8 +1348,8 @@ def main():
     login(token="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")
     
     # Setup memory optimizations
-    setup_memory_optimizations()
-    
+    setup_memory_optimizations_pruning()
+
     # Create output directories based on optimizations used
     optim_methods = []
     if "flux" in args.model_path.lower() or args.precision != "none":
@@ -1376,18 +1361,40 @@ def main():
     
     optimization_name = "_".join(optim_methods) if optim_methods else "no_optim"
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    output_dir = f"combination/combined_outputs_{optimization_name}_{timestamp}"
-    os.makedirs(output_dir, exist_ok=True)
     
-    # Define COCO paths
-    coco_dir = "coco"
-    annotations_file = os.path.join(coco_dir, "annotations", "captions_val2017.json")
     
-    # 1. Load COCO captions
-    print("\n=== Loading COCO Captions ===")
-    image_filename_to_caption, image_dimensions = load_coco_captions(
-        annotations_file, limit=args.num_images
-    )
+    image_filename_to_caption = {}
+    image_dimensions = {}
+    original_dir = ""
+
+    if args.use_coco:
+        # Define COCO paths
+        coco_dir = "coco"
+        annotations_file = os.path.join(coco_dir, "annotations", "captions_val2017.json")
+        
+        # 1. Load COCO captions
+        print("\n=== Loading COCO Captions ===")
+        image_filename_to_caption, image_dimensions = load_coco_captions(annotations_file, limit=args.num_images)
+    
+        # 3. Generate images with optimizations
+        print(f"\n=== Generating Images for {len(image_filename_to_caption)} COCO Captions ===")
+        output_dir = f"combination/combined_outputs_{coco_dir}_{optimization_name}_{timestamp}"
+        os.makedirs(output_dir, exist_ok=True)
+        original_dir = os.path.join(coco_dir, "val2017")
+
+    elif args.use_flickr8k:
+        # Define paths
+        flickr8k_dir = "flickr8k"
+        images_dir = os.path.join(flickr8k_dir, "Images")
+        captions_file = os.path.join(flickr8k_dir, "captions.txt")
+        print("\n=== Loading Flickr8k Captions ===")
+        image_filename_to_caption, image_dimensions = process_flickr8k(images_dir, captions_file)
+
+        print(f"\n=== Generating Images for {len(image_filename_to_caption)} Flickr8k Captions ===")
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        output_dir = f"combination/combined_outputs_{flickr8k_dir}_{optimization_name}_{timestamp}"
+        os.makedirs(output_dir, exist_ok=True)
+        original_dir = images_dir
     
     # 2. Load the optimized model
     print("\n=== Loading Model with Optimizations ===")
@@ -1402,9 +1409,6 @@ def main():
     except Exception as e:
         print(f"Fatal error loading model: {e}")
         return
-    
-    # 3. Generate images with optimizations
-    print(f"\n=== Generating Images for {len(image_filename_to_caption)} COCO Captions ===")
     
     # If VRAM monitoring is enabled, run a single test with monitoring first
     if args.monitor_vram:
@@ -1436,7 +1440,7 @@ def main():
         print(f"VRAM statistics saved to {vram_stats_path}")
     
     # Continue with normal generation for all captions
-    generation_times, generation_metadata = pipeline.generate_images_with_coco(
+    generation_times, generation_metadata = pipeline.generate_images_with_dataset(
         image_filename_to_caption, 
         output_dir, 
         num_images=args.num_images,
@@ -1465,11 +1469,10 @@ def main():
         except Exception as e:
             print(f"Error resizing images: {e}")
         
-        coco_val_dir = os.path.join(coco_dir, "val2017")
         # Calculate FID score
         try:
             print("\n--- Calculating FID Score ---")
-            fid_score = calculate_fid(output_dir, resized_output_dir, coco_val_dir)
+            fid_score = calculate_fid(output_dir, resized_output_dir, original_dir)
             metrics_results["fid_score"] = fid_score
             print(f"FID Score: {fid_score:.4f}")
         except Exception as e:
@@ -1496,7 +1499,7 @@ def main():
         # Calculate LPIPS - we need original images to compare with generated images
         try:
             print("\n--- Calculating LPIPS ---")
-            # For COCO dataset, we need to select a subset of filenames for LPIPS calculation
+            # For dataset, we need to select a subset of filenames for LPIPS calculation
             # We should compare resized images to ensure dimensions match
             
             # Create a directory for resized original images
@@ -1511,9 +1514,9 @@ def main():
             subset_size = min(args.metrics_subset, len(generated_filenames))
             selected_filenames = generated_filenames[:subset_size]
             
-            # Manually resize original COCO images to match generated images for LPIPS calculation
+            # Manually resize original images dataset to match generated images for LPIPS calculation
             for filename in tqdm(selected_filenames, desc="Resizing original images for LPIPS"):
-                original_path = os.path.join(coco_val_dir, filename)
+                original_path = os.path.join(original_dir, filename)
                 resized_original_path = os.path.join(resized_original_dir, filename)
                 
                 if os.path.exists(original_path):
@@ -1539,13 +1542,13 @@ def main():
         # Calculate PSNR - we need original images to compare with generated images
         try:
             print("\n--- Calculating PSNR ---")
-            # For COCO dataset, we use resized generated images
+            # For dataset, we use resized generated images
             generated_filenames = [f for f in os.listdir(resized_output_dir) if os.path.isfile(os.path.join(resized_output_dir, f))
                                 and f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
             
             # Use the metrics_subset parameter to limit the number of images for metrics
             subset_size = min(args.metrics_subset, len(generated_filenames))
-            psnr_score = calculate_psnr_resized(coco_val_dir, resized_output_dir, generated_filenames[:subset_size])
+            psnr_score = calculate_psnr_resized(original_dir, resized_output_dir, generated_filenames[:subset_size])
             metrics_results["psnr"] = psnr_score
         except Exception as e:
             print(f"Error calculating PSNR: {e}")
@@ -1599,8 +1602,8 @@ def main():
             
         if args.use_kv_cache:
             f.write(f"- KV Caching: Enabled\n")
-        
-        f.write(f"\nProcessed {len(image_filename_to_caption)} COCO captions\n")
+
+        f.write(f"\nProcessed {len(image_filename_to_caption)} Dataset captions\n")
         f.write(f"Inference steps: {args.steps}\n")
         f.write(f"Guidance scale: {args.guidance_scale}\n\n")
         

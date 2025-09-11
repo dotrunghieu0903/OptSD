@@ -11,12 +11,14 @@ import json
 import argparse
 from tqdm import tqdm
 from PIL import Image
+import random
 
 # Add parent directory to path for importing modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from shared.cleanup import setup_memory_optimizations_pruning
 from shared.resources_monitor import generate_image_and_monitor
 from metrics import calculate_fid, compute_image_reward, calculate_clip_score, calculate_lpips, calculate_psnr_resized
-from resizing_image import resize_images
+from shared.resizing_image import resize_images
 
 # Import from pruning module
 from pruning import get_model_size, get_sparsity, apply_magnitude_pruning, load_and_prune_model
@@ -32,31 +34,6 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # Authenticate with Hugging Face
 login(token="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")
-
-def setup_memory_optimizations():
-    """
-    Configure memory optimizations for PyTorch to avoid CUDA OOM errors.
-    """
-    # Clear any cached memory
-    torch.cuda.empty_cache()
-    gc.collect()
-    
-    # Print available GPU memory for debugging
-    if torch.cuda.is_available():
-        device = torch.cuda.current_device()
-        gpu_properties = torch.cuda.get_device_properties(device)
-        total_memory = gpu_properties.total_memory / (1024 ** 3)
-        allocated_memory = torch.cuda.memory_allocated(device) / (1024 ** 3)
-        reserved_memory = torch.cuda.memory_reserved(device) / (1024 ** 3)
-        print(f"GPU: {gpu_properties.name}")
-        print(f"Total GPU memory: {total_memory:.2f} GiB")
-        print(f"Allocated GPU memory: {allocated_memory:.2f} GiB")
-        print(f"Reserved GPU memory: {reserved_memory:.2f} GiB")
-        print(f"Free GPU memory: {total_memory - allocated_memory:.2f} GiB")
-    
-    # Set memory fraction to avoid OOM
-    if hasattr(torch.cuda, 'set_per_process_memory_fraction'):
-        torch.cuda.set_per_process_memory_fraction(0.9)
 
 def load_model():
     """
@@ -126,7 +103,6 @@ def enhance_caption(caption):
     ]
     
     # Select a random prefix
-    import random
     prefix = random.choice(enhanced_prefixes)
     
     # Combine prefix with caption and ensure first letter of caption is lowercase
@@ -262,7 +238,7 @@ def main(args=None):
                             choices=["magnitude", "structured", "iterative", "attention_heads"],
                             help="Pruning method to use")
         parser.add_argument("--num_images", type=int, default=500,
-                            help="Number of COCO images to process")
+                            help="Number of images to process")
         parser.add_argument("--steps", type=int, default=30,
                             help="Number of inference steps")
         parser.add_argument("--guidance_scale", type=float, default=3.5,
@@ -274,10 +250,10 @@ def main(args=None):
         args = parser.parse_args()
     
     # Setup memory optimizations to avoid CUDA OOM errors
-    setup_memory_optimizations()
+    setup_memory_optimizations_pruning()
     
     # Create output directories
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    timestamp = time.strftime("%Y%m%d_%H%%MS")
     output_dir = "pruning/pruned_outputs/{}".format(timestamp)
     os.makedirs(output_dir, exist_ok=True)
     
@@ -288,7 +264,8 @@ def main(args=None):
     # 1. Load COCO captions
     print("\n=== Loading COCO Captions ===")
     image_filename_to_caption, image_dimensions = load_coco_captions(
-        annotations_file, limit=args.num_images
+        annotations_file,
+        limit=args.num_images
     )
     
     # 2. Load the standard model
