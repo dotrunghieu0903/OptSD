@@ -1,0 +1,16 @@
+=== Normal Summary ===
+
+Processed 100 COCO captions
+Inference steps: 25
+Guidance scale: 7.5
+Successfully generated 100/100 images
+Average generation time: 53.63 seconds per image
+Total generation time: 5363.40 seconds
+Average VRAM usage across all 100 images: 20.06 GB
+
+=== Image Quality Metrics ===
+FID_SCORE: 195.7185
+CLIP_SCORE: 32.6782
+IMAGE_REWARD: 1.1681
+LPIPS: 0.7381
+PSNR: 7.8636
