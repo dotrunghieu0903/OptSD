@@ -139,7 +139,7 @@ def check_problem_1():
     problem_num = 1
     print(f"\n--- Running Autograder for Problem {problem_num}: Tiled Flash Attention ---")
     try:
-        from problem_1 import FlashAttention2Function
+        from flash_attn_1 import FlashAttention2Function
     except ImportError:
         print(f"Could not import FlashAttention2Function from solution_{problem_num}.py.")
         return
@@ -183,7 +183,7 @@ def check_problem_2():
     problem_num = 2
     print(f"\n--- Running Autograder for Problem {problem_num}: Triton Weighted Row-Sum ---")
     try:
-        from problem_2 import weighted_row_sum_forward, torch_weighted_row_sum
+        from flash_attn_2 import weighted_row_sum_forward, torch_weighted_row_sum
     except ImportError:
         print(f"Could not import functions from solution_{problem_num}.py.")
         return
@@ -214,7 +214,7 @@ def check_problem_3():
     problem_num = 3
     print(f"\n--- Running Autograder for Problem {problem_num}: Non-Causal Flash Attention ---")
     try:
-        from problem_3 import flash_attention_forward
+        from flash_attn_3 import flash_attention_forward
     except ImportError:
         print(f"Could not import flash_attention_forward from solution_{problem_num}.py.")
         return
@@ -237,7 +237,7 @@ def check_problem_4():
     problem_num = 4
     print(f"\n--- Running Autograder for Problem {problem_num}: Causal Flash Attention ---")
     try:
-        from problem_4 import flash_attention_forward
+        from flash_attn_4 import flash_attention_forward
     except ImportError:
         print(f"Could not import flash_attention_forward from solution_{problem_num}.py.")
         return
@@ -260,7 +260,7 @@ def check_problem_5():
     problem_num = 5
     print(f"\n--- Running Autograder for Problem {problem_num}: Grouped-Query Attention ---")
     try:
-        from problem_5 import flash_attention_forward
+        from flash_attn_5 import flash_attention_forward
     except ImportError:
         print(f"Could not import flash_attention_forward from solution_{problem_num}.py.")
         return
@@ -278,13 +278,13 @@ def check_problem_5():
     if all(results):
         print(f"\nAll P{problem_num} correctness tests passed!")
         benchmark_attention(flash_attention_forward, naive_attention, test_cases[-1], is_causal=True, is_gqa=True)
-        
+    
 def check_problem_6():
     """Checks Problem 6: Sliding Window Attention."""
     problem_num = 6
     print(f"\n--- Running Autograder for Problem {problem_num}: Sliding Window Attention ---")
     try:
-        from problem_6 import flash_attention_forward
+        from flash_attn_6 import flash_attention_forward
     except ImportError:
         print(f"Could not import flash_attention_forward from solution_{problem_num}.py.")
         return
@@ -302,15 +302,14 @@ def check_problem_6():
     results = [run_correctness_test(case, flash_attention_forward, is_causal=True, is_gqa=True, is_swa=True, problem_num=problem_num) for case in test_cases]
     if all(results):
         print(f"\nAll P{problem_num} correctness tests passed!")
-        benchmark_attention(flash_attention_forward, naive_attention, test_cases[-1], is_causal=True, is_gqa=True, is_swa=True)
-        
+        benchmark_attention(flash_attention_forward, naive_attention, test_cases[-1], is_causal=True, is_gqa=True, is_swa=True)      
 
 def check_problem_7():
     """Checks Problem 7: Attention Sinks."""
     problem_num = 7
     print(f"\n--- Running Autograder for Problem {problem_num}: Attention Sinks ---")
     try:
-        from problem_7 import flash_attention_forward
+        from flash_attn_7 import flash_attention_forward
     except ImportError:
         print(f"Could not import flash_attention_forward from solution_{problem_num}.py.")
         return

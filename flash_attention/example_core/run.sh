@@ -1,0 +1,2 @@
+python flash_attention/example_core/autograder.py
+python flash_attention/example_core/autograder_optional.py

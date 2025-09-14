@@ -99,7 +99,7 @@ def check_problem_8():
     problem_num = 8
     print(f"\n--- Running Autograder for Problem {problem_num}: GQA Backward Pass ---")
     try:
-        from problem_8 import flash_attention_gqa
+        from flash_attn_8 import flash_attention_gqa
     except ImportError:
         print(f"Could not import FlashAttention2Function from solution_{problem_num}.py.")
         return
@@ -113,7 +113,7 @@ def check_problem_9():
     problem_num = 9
     print(f"\n--- Running Autograder for Problem {problem_num}: GQA + SWDA + Attention Sinks Backward Pass ---")
     try:
-        from problem_9 import flash_swda_with_sink
+        from flash_attn_9 import flash_swda_with_sink
     except ImportError:
         print(f"Could not import FlashAttention2Function from solution_{problem_num}.py.")
         return
