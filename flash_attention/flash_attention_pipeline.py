@@ -354,7 +354,7 @@ class FlashAttentionOptimizedPipeline(OptimizedDiffusionPipeline):
             print(f"Error replacing transformer: {e}")
             return False
 
-    def generate_image(self, prompt, num_inference_steps=30,
+    def generate_image(self, prompt, num_inference_steps=50,
                        guidance_scale=7.5, use_cache=True, use_flash=True,
                        height=1024, width=1024, low_memory_mode=False):
         """
@@ -524,7 +524,7 @@ class FlashAttentionOptimizedPipeline(OptimizedDiffusionPipeline):
                 )
     
     def generate_images_with_dataset(self, image_filename_to_caption, output_dir, num_images=10, 
-                                     num_inference_steps=30, guidance_scale=7.5, 
+                                     num_inference_steps=50, guidance_scale=7.5, 
                                      use_cache=True, use_flash=True,
                                      height=512, width=512):
         """

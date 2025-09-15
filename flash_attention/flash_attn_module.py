@@ -286,7 +286,17 @@ class FlashAttentionModule(torch.nn.Module):
     
     def __init__(self, use_triton=True):
         super().__init__()
-        self.use_triton = use_triton and torch.cuda.is_available() and triton.is_available()
+        # Check if Triton is available by attempting to import and use it
+        triton_available = True
+        try:
+            import triton
+            import triton.language as tl
+            # Test if we can access triton.jit (basic functionality check)
+            _ = triton.jit
+        except (ImportError, AttributeError):
+            triton_available = False
+        
+        self.use_triton = use_triton and torch.cuda.is_available() and triton_available
     
     def forward(self, q, k, v, is_causal=False):
         """
