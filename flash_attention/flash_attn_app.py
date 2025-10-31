@@ -23,10 +23,11 @@ from datetime import datetime
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from flash_attention.flash_attention_pipeline import FlashAttentionOptimizedPipeline
-    from flash_attention.memory_utils import aggressive_memory_cleanup, get_memory_info, print_memory_info, optimize_inference_environment
+    from flash_attn.flash_attn_pipeline import FlashAttentionOptimizedPipeline
+    from flash_attn.memory_utils import aggressive_memory_cleanup, get_memory_info, print_memory_info, optimize_inference_environment
     from dataset.flickr8k import process_flickr8k
-    from shared.metrics import calculate_fid, compute_image_reward, calculate_clip_score, calculate_lpips, calculate_psnr_resized
+    from dataset.coco import process_coco
+    from shared.metrics import calculate_fid_subset, compute_image_reward, calculate_clip_score, calculate_lpips, calculate_psnr_resized
     from shared.resources_monitor import generate_image_and_monitor, monitor_vram, write_generation_metadata_to_file
     from shared.cleanup import setup_memory_optimizations_pruning, optimize_for_inference
 except ImportError as e:
@@ -41,7 +42,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description="Flash Attention Enhanced Diffusion Model Generation")
     
     # Model and optimization parameters
-    parser.add_argument("--model", type=str, default="black-forest-labs/FLUX.1-schnell",
+    parser.add_argument("--model", type=str, default="Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers",
                         help="Model path or HuggingFace repo ID")
     parser.add_argument("--precision", type=str, default="fp16", choices=["fp16", "int8", "int4"],
                         help="Precision to use for quantization")
@@ -51,18 +52,8 @@ def parse_arguments():
                         help="Use KV caching for faster generation")
     parser.add_argument("--flash-attn", action="store_true", default=False,
                         help="Use Flash Attention for faster generation")
-    parser.add_argument("--use-8bit", action="store_true", default=False,
-                        help="Use 8-bit quantization for model loading")
-    parser.add_argument("--use-4bit", action="store_true", default=False,
-                        help="Use 4-bit quantization for model loading")
-    parser.add_argument("--use-fp16", action="store_true", default=True,
-                        help="Use float16 precision")
-    parser.add_argument("--device-map", type=str, default="auto",
-                        help="Device mapping strategy")
     
     # Generation parameters
-    parser.add_argument("--negative-prompt", type=str, default="",
-                        help="Negative prompt for image generation")
     parser.add_argument("--steps", type=int, default=30,
                         help="Number of inference steps")
     parser.add_argument("--guidance", type=float, default=7.5,
@@ -77,7 +68,7 @@ def parse_arguments():
     # Dataset parameters
     parser.add_argument("--dataset", type=str, choices=["flickr8k", "coco", "none"], default="none",
                         help="Dataset to use for generation (flickr8k, coco, or none for single prompt)")
-    parser.add_argument("--num-images", type=int, default=10,
+    parser.add_argument("--num-images", type=int, default=1000,
                         help="Number of images to generate from dataset")
     parser.add_argument("--prompt", type=str, default="a beautiful landscape with mountains and a lake",
                         help="Single prompt for image generation (used when dataset is 'none')")
@@ -91,14 +82,14 @@ def parse_arguments():
     # Metrics parameters
     parser.add_argument("--skip-metrics", action="store_true",
                         help="Skip calculation of image quality metrics")
-    parser.add_argument("--metrics-subset", type=int, default=500,
+    parser.add_argument("--metrics-subset", type=int, default=1000,
                         help="Number of images to use for metrics calculation")
     parser.add_argument("--monitor-vram", action="store_true",
                         help="Monitor VRAM usage during image generation")
     
     # Output directory
-    parser.add_argument("--output-dir", type=str, default="flash_attention_outputs",
-                        help="Base output directory for generated images and metrics")
+    parser.add_argument("--output-dir", type=str, default="flash_attn/outputs",
+                        help="Directory to save generated images and metrics")
     
     return parser.parse_args()
 
@@ -123,8 +114,20 @@ def generate_dataset_images(pipeline, args):
             
             print("\n=== Loading Flickr8k Captions ===")
             # Process flickr8k dataset (now returns just captions dictionary)
-            captions, image_dimensions = process_flickr8k(images_dir, captions_file)
+            captions, image_dimensions = process_flickr8k(images_dir, captions_file, limit=args.num_images)
             print(f"\n=== Generating Images for {len(captions)} Flickr8k Captions ===")
+        elif args.dataset == "coco":
+            # Define COCO paths
+            coco_dir = "coco"
+            
+            # 1. Load COCO captions
+            print("\n=== Loading COCO Captions ===")
+            annotations_dir = os.path.join(coco_dir, "annotations")
+            captions, image_dimensions, _ = process_coco(annotations_dir, limit=args.num_images)
+        
+            # 3. Generate images with optimizations
+            print(f"\n=== Generating Images for {len(captions)} COCO Captions ===")
+            original_images_dir = os.path.join(coco_dir, "val2017")
         else:
             raise ValueError(f"Unsupported dataset: {args.dataset}")
     except Exception as e:
@@ -152,20 +155,14 @@ def generate_dataset_images(pipeline, args):
     os.makedirs(output_dir, exist_ok=True)
     
     print(f"Output directory: {output_dir}")
-    print(f"Generating {args.num_images} images from {args.dataset} dataset")
+    print(f"Generating images from {args.dataset} dataset (dataset already limited to {args.num_images})")
     print(f"Flash Attention: {args.flash_attn}, KV Cache: {args.kv_cache}")
     print(f"VRAM Monitoring: {args.monitor_vram}")
     print(f"Image size: {args.height}x{args.width}, Steps: {args.steps}")
     
-    # Limit the number of images to generate
-    if args.num_images < len(captions):
-        # Get the first num_images captions
-        image_keys = list(captions.keys())[:args.num_images]
-        filtered_captions = {k: captions[k] for k in image_keys}
-        print(f"Selected the first {args.num_images} captions from the dataset")
-    else:
-        filtered_captions = captions
-        print(f"Using all {len(captions)} captions from the dataset")
+    # Use all captions since they're already limited at dataset level
+    filtered_captions = captions
+    print(f"Using all {len(captions)} captions from the dataset")
     
     # Track generation metadata
     generation_times = {}
@@ -176,6 +173,8 @@ def generate_dataset_images(pipeline, args):
         # Generate images one by one
         print(f"\nStarting image generation...")
         
+        # Create a list to store generation metadata
+        generation_metadata = []
         for i, (filename, caption) in enumerate(filtered_captions.items(), 1):
             print(f"\n[{i}/{len(filtered_captions)}] Processing: {filename}")
             print(f"Caption: {caption[:100]}...")
@@ -187,11 +186,13 @@ def generate_dataset_images(pipeline, args):
             output_path = os.path.join(output_dir, output_filename)
             
             try:
+                
                 # Generate image with optional VRAM monitoring
                 if args.monitor_vram:
                     generation_time, metadata = monitor_generation_with_vram(
                         pipeline, caption, output_path, filename, args
                     )
+                    generation_metadata.append(metadata)
                 else:
                     # Standard generation without VRAM monitoring
                     start_time = time.time()
@@ -242,6 +243,8 @@ def generate_dataset_images(pipeline, args):
                         "generation_time": generation_time,
                         "vram_monitoring": False
                     }
+                
+                            # Calculate average VRAM usage across all images
                 
                 if generation_time > 0:
                     generation_times[filename] = generation_time
@@ -313,17 +316,8 @@ def generate_dataset_images(pipeline, args):
                 image_dimensions=image_dimensions,
                 args=args
             )
-            
-            # Save metrics results
-            # metrics_file = os.path.join(output_dir, "metrics_results.json")
-            # try:
-            #     import json
-            #     with open(metrics_file, 'w') as f:
-            #         json.dump(metrics_results, f, indent=2)
-            #     print(f"Metrics results saved to: {metrics_file}")
-            # except Exception as e:
-            #     print(f"Error saving metrics: {e}")
-        
+
+        all_vram_data = [meta.get("average_vram_gb") for meta in generation_metadata if meta.get("average_vram_gb") is not None]
         # Generate summary report
         summary_file = os.path.join(output_dir, "generation_summary.txt")
         try:
@@ -355,6 +349,10 @@ def generate_dataset_images(pipeline, args):
                     f.write(f"  - Max Generation Time: {max(successful_generations_times):.2f}s\n")
                     f.write(f"  - Total Generation Time: {sum(successful_generations_times):.2f}s\n")
                 
+                if all_vram_data:
+                    overall_avg_vram = sum(all_vram_data) / len(all_vram_data)
+                    f.write(f"  - Average VRAM usage across all {len(all_vram_data)} images: {overall_avg_vram:.2f} GB\n")
+
                 if not args.skip_metrics and successful_generations > 0:
                     f.write(f"\nMetrics Results:\n")
                     for metric_name, value in metrics_results.items():
@@ -369,6 +367,10 @@ def generate_dataset_images(pipeline, args):
         
         print(f"\n🎉 Generation completed!")
         
+        if all_vram_data:
+            overall_avg_vram = sum(all_vram_data) / len(all_vram_data)
+            print(f"✅ Average VRAM usage across all {len(all_vram_data)} images: {overall_avg_vram:.2f} GB")
+
         # Use improved generation time calculation for final summary
         successful_generations_times = [t for t in generation_times.values() if t > 0]
         print(f"✅ Successfully generated: {len(successful_generations_times)}/{len(filtered_captions)} images")
@@ -614,7 +616,7 @@ def calculate_all_metrics(generated_dir, original_dir, captions_dict, image_dime
     resized_generated_dir = os.path.join(generated_dir, "resized")
     if original_dir and os.path.exists(original_dir):
         try:
-            print("\n3. Calculating FID Score...")
+            print("--- Calculating FID Score (Subset) ---")
             # First, create resized versions for fair comparison
             from shared.resizing_image import resize_images
             os.makedirs(resized_generated_dir, exist_ok=True)
@@ -622,7 +624,7 @@ def calculate_all_metrics(generated_dir, original_dir, captions_dict, image_dime
             # Resize generated images to match original dimensions
             resize_images(generated_dir, resized_generated_dir, image_dimensions)
             
-            fid_score = calculate_fid(generated_dir, resized_generated_dir, original_dir)
+            fid_score = calculate_fid_subset(generated_dir, resized_generated_dir, original_dir)
             metrics_results["fid_score"] = fid_score
             
         except Exception as e:
@@ -872,6 +874,10 @@ def main():
     print("-" * 50)
     print(f"Model: {args.model}")
     print(f"Dataset: {args.dataset}")
+    # Ensure output directory exists
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir, exist_ok=True)
+        print(f"Created output directory: {args.output_dir}")
     print(f"Output Directory: {args.output_dir}")
     print(f"Precision: {args.precision}")
     print(f"Pruning: {args.pruning}")
@@ -879,8 +885,6 @@ def main():
     print(f"Flash Attention: {args.flash_attn}")
     print(f"VRAM Monitoring: {args.monitor_vram}")
     print(f"Skip Metrics: {args.skip_metrics}")
-    print(f"Using FP16: {args.use_fp16}")
-    print(f"Device map: {args.device_map}")
     print("-" * 50)
     
     # Initialize pipeline with memory-efficient settings
@@ -895,8 +899,7 @@ def main():
             precision=args.precision,
             pruning_amount=args.pruning,
             use_kv_cache=args.kv_cache,
-            use_flash_attention=args.flash_attn,
-            device_map=args.device_map
+            use_flash_attention=args.flash_attn
         )
         
         # Check memory status after loading
@@ -991,6 +994,7 @@ def main():
                 generation_time, metadata = monitor_generation_with_vram(
                     pipeline, args.prompt, output_path, "single_image", args
                 )
+
             else:
                 start_time = time.time()
                 if hasattr(pipeline, 'generate_image'):

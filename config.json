@@ -1,33 +1,61 @@
 {
     "optimization": {
         "apply_pruning": false,
-        "apply_quantization": true,
-        "apply_kvcache": false,
+        "apply_quantization": false,
+        "apply_kvcache": true,
+        "apply_flash_attention": false,
+        "use_enhanced_pipeline": false,
         "is_optimization_enabled": true
     },
+    "modules": {
+        "pruning": {
+            "path": "pruning.pruned",
+            "main_function": "main"
+        },
+        "quantization": {
+            "path": "quantization.quantized",
+            "main_function": "main"
+        },
+        "kvcache": {
+            "path": "kvcache.kvcached",
+            "main_function": "main"
+        },
+        "flash_attention": {
+            "path": "flash_attn.flash_attn_app",
+            "enhanced_path": "flash_attn.flash_attn_pipeline",
+            "main_function": "main"
+        },
+        "normal": {
+            "path": "normal.normal_coco",
+            "main_function": "main"
+        },
+        "combination": {
+            "path": "combination.combined_optimization",
+            "main_function": "main"
+        }
+    },
     "model_params": {
-        "pruning_amount": 0.3,
+        "pruning_amount": 0.1,
         "pruning_method": "magnitude",
-        "bits": 4,
         "quant_method": "dynamic",
         "precision": "int4",
-        "num_images": 500,
-        "steps": 25,
+        "num_images": 10,
+        "steps": 30,
         "guidance_scale": 7.5,
         "skip_metrics": false,
-        "metrics_subset": 100,
+        "metrics_subset": 10,
         "model_name": "Flux.1-schnell",
-        "dataset_name": "Flickr8k"
+        "dataset_name": "MSCOCO2017"
     },
     "models": {
         "Flux.1-schnell": {
             "path": "black-forest-labs/FLUX.1-schnell",
-            "quant_path": "nunchaku-tech/nunchaku-flux.1-schnell/svdq-int4-flux.1-schnell.safetensors",
+            "quant_path": "mit-han-lab/nunchaku-flux.1-schnell/svdq-int4_r32-flux.1-schnell.safetensors",
             "description": "Use for Image Generation task - text2image and sketch2image"
         },
         "Flux.1-dev": {
             "path": "black-forest-labs/FLUX.1-dev",
-            "quant_path": "nunchaku-tech/nunchaku-flux.1-dev/svdq-int4_r32-flux.1-dev.safetensors",
+            "quant_path": "mit-han-lab/nunchaku-flux.1-dev/svdq-int4_r32-flux.1-dev.safetensors",
             "description": "Use for Inpainting task"
         },
         "SANA 1.6B": {

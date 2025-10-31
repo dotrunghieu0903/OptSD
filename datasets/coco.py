@@ -149,12 +149,13 @@ def load_coco_captions(annotations_file, limit=500):
     
     return image_filename_to_caption, image_dimensions
 
-def preprocessing_coco(annotations_dir):
+def process_coco(annotations_dir, limit=None):
     """
     Load COCO captions and image dimensions from annotations
     
     Args:
         annotations_dir: Directory containing COCO annotations
+        limit: Maximum number of captions to load (default: None - load all)
         
     Returns:
         image_filename_to_caption: Dictionary mapping image filenames to captions
@@ -180,7 +181,11 @@ def preprocessing_coco(annotations_dir):
     # Store {filename: (width, height)}
     image_dimensions = {}
     # Create a dictionary to store captions by image ID
-    for annotation in captions_data['annotations']:
+    processed_count = 0
+    # Sort image IDs to ensure deterministic order when taking first N images
+    sorted_image_ids = sorted(captions_data['annotations'], key=lambda x: x['image_id'])
+    
+    for annotation in sorted_image_ids:
         image_id = annotation['image_id']
         caption = annotation['caption']
 
@@ -189,8 +194,16 @@ def preprocessing_coco(annotations_dir):
             image_filename_to_caption[original_filename] = caption
             image_dimensions[original_filename] = (width, height)
             processed_image_ids.add(image_id)
+            processed_count += 1
+            
+            # Stop when we reach the limit (if specified)
+            if limit is not None and processed_count >= limit:
+                break
 
-    print(f"Extracted captions for {len(processed_image_ids)} images.")
+    if limit is not None:
+        print(f"Extracted captions for {len(processed_image_ids)} images (limit: {limit}).")
+    else:
+        print(f"Extracted captions for {len(processed_image_ids)} images.")
     print(f"Created mapping for {len(image_filename_to_caption)} images.")
     print(f"Extracted dimensions for {len(image_dimensions)} images from annotations.")
     return image_filename_to_caption, image_dimensions, image_id_to_dimensions

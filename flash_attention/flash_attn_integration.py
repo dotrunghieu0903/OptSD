@@ -17,7 +17,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size
 
 # Add parent directory to path for importing modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from flash_attention.flash_attn_module import FlashAttentionModule, FlashMHA
+from flash_attn.flash_attn_module import FlashAttentionModule, FlashMHA
 
 def free_memory():
     """Free unused GPU memory and run garbage collection"""

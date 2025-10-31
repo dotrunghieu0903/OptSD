@@ -5,6 +5,8 @@ import gc
 import json
 import os
 from PIL import Image
+from dataset.coco import process_coco
+from shared.cleanup import setup_memory_optimizations_pruning
 import torch
 from tqdm import tqdm
 
@@ -12,12 +14,11 @@ from diffusers import FluxPipeline
 from huggingface_hub import login
 # Fix import paths to be relative to the project root
 import sys
-import os
 # Add the project root to the path if needed
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from metrics import calculate_clip_score, calculate_fid, calculate_lpips, calculate_psnr_resized, compute_image_reward
+from shared.metrics import calculate_clip_score, calculate_fid_subset, calculate_lpips, calculate_psnr_resized, compute_image_reward
 from shared.resources_monitor import generate_image_and_monitor, write_generation_metadata_to_file
-from resizing_image import resize_images
+from shared.resizing_image import resize_images
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -27,31 +28,6 @@ login(token="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")
 normal_dir = os.path.dirname(os.path.abspath(__file__))
 if normal_dir not in sys.path:
     sys.path.append(normal_dir)
-
-
-def setup_memory_optimizations():
-    """Apply memory optimizations to avoid CUDA OOM errors"""
-    # PyTorch memory optimizations
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    gc.collect()
-    # Print available GPU memory for debugging
-    if torch.cuda.is_available():
-        device = torch.cuda.current_device()
-        gpu_properties = torch.cuda.get_device_properties(device)
-        total_memory = gpu_properties.total_memory / (1024 ** 3)
-        allocated_memory = torch.cuda.memory_allocated(device) / (1024 ** 3)
-        reserved_memory = torch.cuda.memory_reserved(device) / (1024 ** 3)
-        print(f"GPU: {gpu_properties.name}")
-        print(f"Total GPU memory: {total_memory:.2f} GiB")
-        print(f"Allocated GPU memory: {allocated_memory:.2f} GiB")
-        print(f"Reserved GPU memory: {reserved_memory:.2f} GiB")
-        print(f"Free GPU memory: {total_memory - allocated_memory:.2f} GiB")
-    
-    # Set memory fraction to avoid OOM
-    if hasattr(torch.cuda, 'set_per_process_memory_fraction'):
-        torch.cuda.set_per_process_memory_fraction(0.9)
-
 
 def load_model(config, model_name=None):
     """Load the model from Hugging Face without optimization"""
@@ -83,41 +59,6 @@ def get_model_size(model):
     return model_size_mb
 
 
-def preprocessing_coco(annotations_dir):
-    """Process COCO dataset annotations"""
-    # Path to the captions annotation file
-    captions_file = os.path.join(annotations_dir, 'captions_val2017.json')
-
-    # Load the captions data
-    with open(captions_file, 'r') as f:
-        captions_data = json.load(f)
-
-    # Build dictionary mapping image_id to size
-    image_id_to_dimensions = {img['id']: (img['width'], img['height'], img['file_name'])
-                            for img in captions_data['images']}
-
-    print(f"Read {len(captions_data['annotations'])} captions from COCO annotation file...")
-    # To ensure each original image is processed only once for the main prompt purpose
-    processed_image_ids = set()
-
-    image_filename_to_caption = {}
-    # Store {filename: (width, height)}
-    image_dimensions = {}
-    # Create a dictionary to store captions by image ID
-    for annotation in captions_data['annotations']:
-        image_id = annotation['image_id']
-        caption = annotation['caption']
-
-        if image_id in image_id_to_dimensions and image_id not in processed_image_ids:
-            width, height, original_filename = image_id_to_dimensions[image_id]
-            image_filename_to_caption[original_filename] = caption
-            image_dimensions[original_filename] = (width, height)
-            processed_image_ids.add(image_id)
-
-    print(f"Processed {len(image_filename_to_caption)} unique images from COCO dataset")
-    return image_filename_to_caption, image_dimensions, image_id_to_dimensions
-
-
 def main(args=None):
     # Setup argument parser if args not provided
     if args is None:
@@ -137,7 +78,7 @@ def main(args=None):
         args = parser.parse_args()
     
     # Apply memory optimizations
-    setup_memory_optimizations()
+    setup_memory_optimizations_pruning()
 
     # Load configuration
     with open('config.json', 'r') as f:
@@ -153,7 +94,7 @@ def main(args=None):
 
     # Process COCO dataset
     print("\n=== Loading COCO Captions ===")
-    image_filename_to_caption, image_dimensions, image_id_to_dimensions = preprocessing_coco(annotations_dir)
+    image_filename_to_caption, image_dimensions, image_id_to_dimensions = process_coco(annotations_dir, limit=args.num_images)
 
     # Create output directories
     output_dir = "normal/normal_outputs"
@@ -291,11 +232,10 @@ def main(args=None):
         resized_original_dir = os.path.join(output_dir, "resized_original")
         os.makedirs(resized_original_dir, exist_ok=True)
         
-        # Calculate FID score
+        # Calculate FID score (Subset) (Subset)
         try:
-            print("\n--- Calculating FID Score ---")
-            coco_val_dir = os.path.join(coco_dir, "val2017")
-            fid_score = calculate_fid(output_dir, resized_output_dir, coco_val_dir)
+            print("--- Calculating FID Score (Subset) ---")
+            fid_score = calculate_fid_subset(output_dir, resized_output_dir, val2017_dir)
             metrics_results["fid_score"] = fid_score
         except Exception as e:
             print(f"Error calculating FID: {e}")

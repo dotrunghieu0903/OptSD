@@ -41,25 +41,24 @@ python combination/combined_optimization.py --model_path "black-forest-labs/FLUX
 python combination/combined_optimization.py --model_path "Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers" --precision int4 --pruning_amount 0.3 --use_kv_cache --num_images 1000 --steps 50 --monitor_vram
 
 
-python combination/combined_optimization.py --model_path "black-forest-labs/FLUX.1-dev" --precision int4 --use_kv_cache --num_images 10 --steps 50 --monitor_vram
+python combination/combined_optimization.py --model_path "black-forest-labs/FLUX.1-dev" --use_kv_cache --precision int4  --num_images 10 --steps 50 --monitor_vram
 python combination/combined_optimization.py --model_path "black-forest-labs/FLUX.1-dev" --use_kv_cache --num_images 10 --steps 50 --monitor_vram
 python combination/combined_optimization.py --model_path "black-forest-labs/FLUX.1-dev" --use_kv_cache --pruning_amount 0.0 --num_images 100 --steps 50 --monitor_vram --use_flickr8k
 python combination/combined_optimization.py --model_path "black-forest-labs/FLUX.1-dev" --use_kv_cache --pruning_amount 0.3 --num_images 200 --steps 50 --monitor_vram --use_flickr8k
 
-python combination/combined_optimization.py --model_path "black-forest-labs/FLUX.1-schnell" --precision int4 --use_kv_cache --num_images 10 --steps 50 --monitor_vram
+python combination/combined_optimization.py --model_path "black-forest-labs/FLUX.1-schnell" --use_kv_cache --precision int4  --num_images 10 --steps 50 --monitor_vram
 python combination/combined_optimization.py --model_path "black-forest-labs/FLUX.1-schnell" --use_kv_cache --num_images 10 --steps 50 --monitor_vram
 python combination/combined_optimization.py --model_path "black-forest-labs/FLUX.1-schnell" --use_kv_cache --pruning_amount 0.0 --num_images 100 --steps 50 --monitor_vram --use_flickr8k
 python combination/combined_optimization.py --model_path "black-forest-labs/FLUX.1-schnell" --use_kv_cache --pruning_amount 0.3 --num_images 500 --steps 50 --monitor_vram --use_flickr8k
-python combination/combined_optimization.py --model_path "black-forest-labs/FLUX.1-schnell" --pruning_amount 0.3 --num_images 500 --steps 50 --monitor_vram --use_flickr8k
 
 python combination/combined_optimization.py --model_path "Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers" --use_kv_cache --num_images 10 --steps 50 --monitor_vram --use_flickr8k
 python combination/combined_optimization.py --model_path "Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers" --pruning_amount 0.3 --use_kv_cache --num_images 10 --steps 50 --monitor_vram --use_flickr8k
 
 python kvcache/sam_kvcache.py --coco_dir /coco --num_images 5 --benchmark --num_runs 5 --metrics_subset 20
 
-# Run by app.py
-rm -rf quantization/quant_outputs/coco/*
-python app.py --dataset_name "MSCOCO2017" --num_images 5 --inference_steps 50 --guidance_scale 3.5 --metrics_subset 5
+# FlashAttention
+python flash_attention/flash_attn_app.py --dataset flickr8k --num-images 500 --flash-attn --kv-cache --monitor-vram --output-dir flash_attention --precision int4 --pruning 0.3 --steps 30
 
-rm -rf quantization/quant_outputs/flickr8k/*
-python app.py --dataset_name "Flickr8k" --num_images 5 --inference_steps 50 --guidance_scale 3.5 --metrics_subset 5
+python flash_attention/flash_attn_app.py --dataset coco --num-images 500 --flash-attn --kv-cache --monitor-vram --output-dir flash_attention --precision int4 --pruning 0.3 --steps 30
+python flash_attention/flash_attn_app.py --dataset coco --num-images 1 --flash-attn --monitor-vram --output-dir flash_attention --precision int4 --pruning 0.3 --steps 30
+python flash_attention/flash_attn_app.py --dataset coco --num-images 10 --metrics-subset 10 --flash-attn --monitor-vram --output-dir flash_attention --precision int4 --pruning 0.3 --steps 30

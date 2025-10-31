@@ -40,7 +40,7 @@ def aggressive_memory_cleanup():
     if hasattr(torch, 'cuda') and hasattr(torch.cuda, 'memory_summary'):
         # Print memory summary for debugging
         print("Memory summary after cleanup:")
-        print(torch.cuda.memory_summary(abbreviated=True))
+        # print(torch.cuda.memory_summary(abbreviated=True))
     
     return get_memory_info()
 

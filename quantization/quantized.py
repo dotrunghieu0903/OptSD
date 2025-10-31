@@ -15,7 +15,7 @@ import sys
 # Add the project root to the path if needed
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
-from metrics import calculate_clip_score, calculate_fid, calculate_lpips, calculate_psnr_resized, compute_image_reward
+from shared.metrics import calculate_clip_score, calculate_fid_subset, calculate_lpips, calculate_psnr_resized, compute_image_reward
 from nunchaku import NunchakuFluxTransformer2dModel
 from nunchaku.utils import get_precision
 # Import preprocessing from current directory since we're already in the quantization module
@@ -32,16 +32,24 @@ from shared.resizing_image import resize_images
 from shared.resources_monitor import generate_image_and_monitor, write_generation_metadata_to_file
 from shared.cleanup import setup_memory_optimizations
 
-def load_model(precision_override=None):
+def load_model(precision_override=None, model_config=None):
     """Load the model with specified precision or auto-detect"""
     try:
         # Auto-detect precision if not specified
         precision = precision_override if precision_override else get_precision()
         print(f"Using precision: {precision}")
         
+        # Use model config if provided, otherwise use default path
+        if model_config and "quant_path" in model_config:
+            model_path = model_config["quant_path"]
+            print(f"Loading quantized model from config: {model_path}")
+        else:
+            model_path = f"mit-han-lab/svdq-{precision}-flux.1-schnell"
+            print(f"Loading default quantized model: {model_path}")
+        
         # Load transformer model
         transformer = NunchakuFluxTransformer2dModel.from_pretrained(
-            f"mit-han-lab/svdq-{precision}-flux.1-schnell", 
+            model_path, 
             offload=True
         )
         return transformer, precision
@@ -49,7 +57,7 @@ def load_model(precision_override=None):
         print(f"Error loading model: {e}")
         raise
 
-def create_pipeline(transformer):
+def create_pipeline(transformer, model_config=None):
     """Create pipeline from transformer model"""
     pipeline_init_kwargs: dict = {}
     # from nunchaku.models.text_encoders.t5_encoder import NunchakuT5EncoderModel
@@ -59,12 +67,35 @@ def create_pipeline(transformer):
     # )
     # pipeline_init_kwargs["text_encoder_2"] = text_encoder_2
 
-    transformer = NunchakuFluxTransformer2dModel.from_pretrained(
-        "mit-han-lab/nunchaku-flux.1-schnell/svdq-int4_r32-flux.1-schnell.safetensors", precision="int4"
-    )
+    # Use provided transformer or create new one from config
+    if transformer is None:
+        # Use model config quant_path if provided
+        if model_config and "quant_path" in model_config:
+            quant_path = model_config["quant_path"]
+            print(f"Loading transformer from config quant_path: {quant_path}")
+            transformer = NunchakuFluxTransformer2dModel.from_pretrained(
+                quant_path, precision="int4"
+            )
+        else:
+            # Use default path if no config provided
+            default_path = "mit-han-lab/nunchaku-flux.1-schnell/svdq-int4_r32-flux.1-schnell.safetensors"
+            print(f"Loading transformer from default path: {default_path}")
+            transformer = NunchakuFluxTransformer2dModel.from_pretrained(
+                default_path, precision="int4"
+            )
+    
     pipeline_init_kwargs["transformer"] = transformer
+    
+    # Use model path from config if provided
+    if model_config and "path" in model_config:
+        model_path = model_config["path"]
+        print(f"Creating pipeline using model path from config: {model_path}")
+    else:
+        model_path = "black-forest-labs/FLUX.1-schnell"
+        print(f"Creating pipeline using default model path: {model_path}")
+        
     pipeline = FluxPipeline.from_pretrained(
-        "black-forest-labs/FLUX.1-schnell", 
+        model_path, 
         transformer=transformer, 
         torch_dtype=torch.bfloat16,
         # **pipeline_init_kwargs
@@ -88,8 +119,8 @@ def main(args=None):
                             help="Quantization method to use")
         parser.add_argument("--precision", type=str, default=None, 
                             help="Precision to use (default is auto-detected)")
-        parser.add_argument("--num_images", type=int, default=500,
-                            help="Number of images to process")
+        parser.add_argument("--num_images", type=int, default=1000,
+                            help="Number of first images to process from dataset (deterministic order)")
         parser.add_argument("--steps", type=int, default=30,
                             help="Number of inference steps")
         parser.add_argument("--guidance_scale", type=float, default=3.5,
@@ -98,39 +129,168 @@ def main(args=None):
                             help="Skip calculation of image quality metrics")
         parser.add_argument("--metrics_subset", type=int, default=100,
                             help="Number of images to use for metrics calculation (default: 100)")
-        parser.add_argument("dataset_name", type=str, default="MSCOCO2017",
+        parser.add_argument("--dataset_name", type=str, default="MSCOCO2017",
                             help="Name of the dataset to use")
         parser.add_argument("--caption_path", type=str, default=None,
                             help="Path to the captions file")
         parser.add_argument("--images_path", type=str, default=None,
                             help="Path to the images directory")
+        parser.add_argument("--model_name", type=str, default="Flux.1-schnell",
+                            help="Name of the model to use from config.json")
         args = parser.parse_args()
+    
+    # Handle compatibility between different parameter naming conventions
+    # This makes the code work with both command-line args and app.py
+    if not hasattr(args, 'steps') and hasattr(args, 'inference_steps'):
+        args.steps = args.inference_steps
+        print(f"Using inference_steps as steps: {args.steps}")
+        
+    # Make sure all necessary attributes exist with defaults if not provided
+    if not hasattr(args, 'num_images'):
+        args.num_images = 10
+        print(f"num_images not specified, using default: {args.num_images}")
+        
+    if not hasattr(args, 'metrics_subset'):
+        args.metrics_subset = 100
+        print(f"metrics_subset not specified, using default: {args.metrics_subset}")
+        
+    if not hasattr(args, 'skip_metrics'):
+        args.skip_metrics = False
+        
+    if not hasattr(args, 'guidance_scale'):
+        args.guidance_scale = 3.5
+        print(f"guidance_scale not specified, using default: {args.guidance_scale}")
+        
+    if not hasattr(args, 'quant_method'):
+        args.quant_method = "dynamic"
+        print(f"quant_method not specified, using default: {args.quant_method}")
+        
+    if not hasattr(args, 'precision') or args.precision is None:
+        args.precision = "int4"
+        print(f"precision not specified, using default: {args.precision}")
+        
+    if not hasattr(args, 'model_name'):
+        args.model_name = "Flux.1-schnell"
+        print(f"model_name not specified, using default: {args.model_name}")
     
     # Apply memory optimizations
     setup_memory_optimizations()
 
     # Replace 'YOUR_TOKEN' with your actual Hugging Face token
     login(token="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")
+    
+    # Access and print all available parameters (for debugging)
+    print("\nParameters being used:")
+    for key, value in vars(args).items():
+        print(f"- {key}: {value}")
+        
+    # Load model config from config.json
+    model_config = None
+    try:
+        import json
+        with open('config.json', 'r') as f:
+            config = json.load(f)
+            models = config.get("models", {})
+            # Try to get model config based on model_name
+            if args.model_name in models:
+                model_config = models[args.model_name]
+                print(f"\nLoaded model configuration for {args.model_name}:")
+                for key, value in model_config.items():
+                    print(f"- {key}: {value}")
+            else:
+                print(f"\nWarning: No configuration found for model '{args.model_name}' in config.json")
+                print("Available models in config:", list(models.keys()))
+    except Exception as e:
+        print(f"\nError loading model config from config.json: {e}")
+        print("Will continue with default model paths")
 
-    # Define paths
-    annotations_dir = args.caption_path
-    image_dir = args.images_path
+    # Define paths with fallback values in case attributes are not present
+    annotations_dir = getattr(args, 'caption_path', None)
+    image_dir = getattr(args, 'images_path', None)
+    
+    # Determine dataset name, with proper handling for Namespace objects
+    dataset_name = getattr(args, 'dataset_name', None)
+    if dataset_name is None:
+        # Fall back to default if not specified
+        dataset_name = "MSCOCO2017"
+        print(f"Dataset name not specified, defaulting to {dataset_name}")
+        
+    # Check if paths are provided
+    if annotations_dir is None or image_dir is None:
+        # Try to get paths from config.json
+        import json
+        try:
+            with open('config.json', 'r') as f:
+                config = json.load(f)
+                datasets = config.get("datasets", [])
+                
+                # Find dataset matching the name
+                for dataset in datasets:
+                    if dataset.get("name") == dataset_name:
+                        if annotations_dir is None:
+                            annotations_dir = dataset.get("caption_path")
+                            print(f"Using caption_path from config.json: {annotations_dir}")
+                        if image_dir is None:
+                            image_dir = dataset.get("images_path")
+                            print(f"Using images_path from config.json: {image_dir}")
+                        break
+        except Exception as e:
+            print(f"Error loading paths from config.json: {e}")
+            
+    # Final check if paths are available
+    if annotations_dir is None or image_dir is None:
+        print("ERROR: caption_path and/or images_path not provided.")
+        print("Please provide these values via command line arguments or config.json")
+        return
 
     generation_output_dir = ""
     image_filename_to_caption = {}
     image_dimensions = {}
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    if args.dataset_name == "MSCOCO2017":
-        # Process COCO dataset
-        print("\n=== Loading COCO Captions ===")
-        image_filename_to_caption, image_dimensions, _ = process_coco(annotations_dir)
-        generation_output_dir = f"quantization/quant_outputs/coco/{timestamp}"
-    else:
-        # Process Flickr8k dataset
-        print("\n=== Loading Flickr8k Captions ===")
-        flickr_captions_path = f"{args.caption_path}/captions.txt"
-        image_filename_to_caption, image_dimensions = process_flickr8k(image_dir, flickr_captions_path)
-        generation_output_dir = f"quantization/quant_outputs/flickr8k/{timestamp}"
+    
+    try:
+        if dataset_name == "MSCOCO2017":
+            # Process COCO dataset
+            print("\n=== Loading COCO Captions ===")
+            try:
+                image_filename_to_caption, image_dimensions, _ = process_coco(annotations_dir, limit=args.num_images)
+                generation_output_dir = f"quantization/coco/{timestamp}"
+            except Exception as e:
+                print(f"Error processing COCO dataset: {e}")
+                return
+        elif dataset_name == "Flickr8k":
+            # Process Flickr8k dataset
+            print("\n=== Loading Flickr8k Captions ===")
+            try:
+                # Check if captions file exists
+                flickr_captions_path = os.path.join(annotations_dir, "captions.txt")
+                if not os.path.exists(flickr_captions_path):
+                    # Try direct path if not found
+                    flickr_captions_path = annotations_dir
+                    if not os.path.exists(flickr_captions_path):
+                        print(f"Error: Flickr captions file not found at {flickr_captions_path}")
+                        return
+                
+                image_filename_to_caption, image_dimensions = process_flickr8k(image_dir, flickr_captions_path, limit=args.num_images)
+                generation_output_dir = f"quantization/quant_outputs/flickr8k/{timestamp}"
+            except Exception as e:
+                print(f"Error processing Flickr8k dataset: {e}")
+                return
+        else:
+            print(f"Unsupported dataset: {dataset_name}")
+            print("Currently supported datasets: MSCOCO2017, Flickr8k")
+            return
+            
+        # Verify we loaded some captions
+        if not image_filename_to_caption:
+            print("Error: No captions loaded from dataset. Cannot proceed.")
+            return
+            
+        print(f"Successfully loaded {len(image_filename_to_caption)} captions.")
+        
+    except Exception as e:
+        print(f"Error loading dataset: {e}")
+        return
 
     # Create output directories
     os.makedirs(generation_output_dir, exist_ok=True)
@@ -143,16 +303,20 @@ def main(args=None):
     # 1. Load the model with quantization
     print("\n=== Loading Quantized Model ===")
     try:
-        transformer, precision = load_model(args.precision)
+        # Pass model_config to load_model for quant_path
+        transformer, precision = load_model(args.precision, model_config)
         quantized_size = get_model_size(transformer)
         print(f"Quantized model size: {quantized_size:.2f} MB")
     except Exception as e:
         print(f"Error loading quantized model: {e}")
+        transformer = None
+        precision = args.precision
 
     # Create pipeline with the quantized model
     print("\n=== Creating Pipeline ===")
     try:
-        pipeline = create_pipeline(transformer)
+        # Pass model_config to create_pipeline for model path
+        pipeline = create_pipeline(transformer, model_config)
         
         # Test the pipeline with a simple prompt to ensure it works
         print("Testing pipeline with a simple prompt...")
@@ -178,14 +342,14 @@ def main(args=None):
     # 2. Generate images for captions
     print(f"\n=== Generating Images for Captions ===")
     
-    # Limit the number of images to generate based on the command-line argument
-    num_images_to_generate = min(args.num_images, len(image_filename_to_caption))
-    print(f"Will generate {num_images_to_generate} images")
+    # Use all loaded captions since we've already limited them at dataset level
+    num_images_to_generate = len(image_filename_to_caption)
+    print(f"Will generate {num_images_to_generate} images (dataset already limited to {args.num_images})")
     
     # Keep track of generation time
     generation_times = {}
     
-    for i, (filename, prompt) in enumerate(tqdm(list(image_filename_to_caption.items())[:num_images_to_generate], desc="Generating images")):
+    for i, (filename, prompt) in enumerate(tqdm(list(image_filename_to_caption.items()), desc="Generating images")):
         output_path = os.path.join(generation_output_dir, filename)
         
         print(f"\n{'='*80}")
@@ -251,8 +415,8 @@ def main(args=None):
         
         # Calculate FID score
         try:
-            print("\n--- Calculating FID Score ---")
-            fid_score = calculate_fid(generation_output_dir, resized_output_dir, image_dir)
+            print("\n--- Calculating FID Score (Subset) ---")
+            fid_score = calculate_fid_subset(generation_output_dir, resized_output_dir, image_dir)
             metrics_results["fid_score"] = fid_score
         except Exception as e:
             print(f"Error calculating FID: {e}")
@@ -275,7 +439,7 @@ def main(args=None):
         
         # Calculate LPIPS - we need original images to compare with generated images
         try:
-            print("\n--- Calculating LPIPS ---")
+            print("\n--- Calculating LPIPS (Subset) ---")
             # For dataset, we need to select a subset of filenames for LPIPS calculation
             # We should compare resized images to ensure dimensions match
             
@@ -288,8 +452,12 @@ def main(args=None):
             subset_size = min(args.metrics_subset, len(generated_filenames))
             selected_filenames = generated_filenames[:subset_size]
             
-            # Manually resize original COCO images to match generated images for LPIPS calculation
-            for filename in tqdm(selected_filenames, desc="Resizing original images for LPIPS"):
+            # Use the prepare_corresponding_originals function to automatically 
+            # get the corresponding originals and resize them to match generated images
+            print(f"Preparing {len(selected_filenames)} corresponding original images for LPIPS...")
+            
+            # Resize original images to match generated images
+            for filename in tqdm(selected_filenames, desc="Resizing corresponding originals for LPIPS"):
                 original_path = os.path.join(image_dir, filename)
                 resized_original_path = os.path.join(resized_original_dir, filename)
                 
@@ -315,7 +483,7 @@ def main(args=None):
         
         # Calculate PSNR - we need original images to compare with generated images
         try:
-            print("\n--- Calculating PSNR ---")
+            print("\n--- Calculating PSNR (Subset) ---")
             # For dataset, we use resized generated images
             generated_filenames = [f for f in os.listdir(resized_output_dir) 
                                 if os.path.isfile(os.path.join(resized_output_dir, f))
@@ -323,7 +491,10 @@ def main(args=None):
             
             # Use the metrics_subset parameter to limit the number of images for metrics
             subset_size = min(args.metrics_subset, len(generated_filenames))
-            psnr_score = calculate_psnr_resized(image_dir, resized_output_dir, generated_filenames[:subset_size])
+            selected_filenames = generated_filenames[:subset_size]
+            
+            print(f"Calculating PSNR for {len(selected_filenames)} images...")
+            psnr_score = calculate_psnr_resized(image_dir, resized_output_dir, selected_filenames)
             metrics_results["psnr"] = psnr_score
         except Exception as e:
             print(f"Error calculating PSNR: {e}")
