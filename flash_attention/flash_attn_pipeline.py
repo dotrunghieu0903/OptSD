@@ -14,11 +14,11 @@ import torch
 # Add the project root directory to the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from combination.combined_optimization import OptimizedDiffusionPipeline
-from flash_attention.flash_attention_integration import FlashAttentionKVCacheTransformer
+from flash_attn.flash_attn_integration import FlashAttentionKVCacheTransformer
 # Import memory optimization tools
 import gc
 
-from nunchaku import NunchakuFluxTransformer2dModel
+from nunchaku import NunchakuFluxTransformer2dModel, NunchakuSanaTransformer2DModel
 
 # Configure PyTorch memory management
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:512"
@@ -78,7 +78,7 @@ class FlashAttentionOptimizedPipeline(OptimizedDiffusionPipeline):
             
         try:
             # Use our reliable fallback method directly
-            self._load_model_fallback()
+            self._load_model()
             print("✓ Model loaded successfully")
             
             # Apply Flash Attention if enabled and pipeline was loaded successfully
@@ -94,22 +94,28 @@ class FlashAttentionOptimizedPipeline(OptimizedDiffusionPipeline):
             traceback.print_exc()
             raise
                 
-    def _load_model_fallback(self):
-        """Fallback method to load model if parent class fails"""
-        print("Using fallback model loading...")
+    def _load_model(self):
+        """Method to load model with memory optimizations and Flash Attention support"""
+        print("Using model loading...")
         
-        from diffusers import DiffusionPipeline
+        from diffusers import DiffusionPipeline, SanaPipeline
         
         try:
             # Apply memory optimizations first
             free_memory()
-            
-            model_path = f"nunchaku-tech/nunchaku-flux.1-schnell/svdq-int4_r32-flux.1-schnell.safetensors"
-            transformer = NunchakuFluxTransformer2dModel.from_pretrained(model_path, offload=True)
+
+            # model_path = f"nunchaku-tech/nunchaku-flux.1-dev/svdq-int4_r32-flux.1-dev.safetensors"
+            # model_path = "mit-han-lab/nunchaku-flux.1-schnell/svdq-int4_r32-flux.1-schnell.safetensors"
+            model_path = f"nunchaku-tech/nunchaku-sana/svdq-int4_r32-sana1.6b.safetensors"
+            # transformer = NunchakuFluxTransformer2dModel.from_pretrained(model_path, offload=True)
+            transformer = NunchakuSanaTransformer2DModel.from_pretrained(model_path, offload=True)
             # Simple direct loading with diffusers
-            pipe_path = "black-forest-labs/FLUX.1-schnell"
+            # pipe_path = "black-forest-labs/FLUX.1-dev"
+            pipe_path = "Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers"
+            # pipe_path = "black-forest-labs/FLUX.1-schnell"
             print(f"Loading model: {pipe_path}")
-            self.pipeline = DiffusionPipeline.from_pretrained(
+            # self.pipeline = DiffusionPipeline.from_pretrained(
+            self.pipeline = SanaPipeline.from_pretrained(
                 pipe_path,
                 transformer=transformer,
                 torch_dtype=torch.bfloat16,
@@ -356,7 +362,7 @@ class FlashAttentionOptimizedPipeline(OptimizedDiffusionPipeline):
 
     def generate_image(self, prompt, num_inference_steps=50,
                        guidance_scale=7.5, use_cache=True, use_flash=True,
-                       height=1024, width=1024, low_memory_mode=False):
+                       height=256, width=256, low_memory_mode=False):
         """
         Generate an image using the optimized pipeline with Flash Attention
         

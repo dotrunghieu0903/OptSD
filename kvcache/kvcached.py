@@ -18,7 +18,7 @@ from nunchaku import NunchakuSanaTransformer2DModel, NunchakuFluxTransformer2dMo
 
 # Add the project root to the path to access shared modules
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from metrics import calculate_clip_score, calculate_fid, calculate_lpips, calculate_psnr_resized, compute_image_reward
+from shared.metrics import calculate_clip_score, calculate_fid_subset, calculate_lpips, calculate_psnr_resized, compute_image_reward
 from shared.resizing_image import resize_images
 from shared.resources_monitor import generate_image_and_monitor, monitor_vram, write_generation_metadata_to_file
 from shared.cleanup import setup_memory_optimizations
@@ -32,7 +32,7 @@ stop_monitoring = threading.Event()
 class KVCacheTransformer(torch.nn.Module):
     """Transformer model with Key-Value caching for transformer blocks
     
-    SANA model sử dụng transformer thay vì UNet như trong các mô hình Diffusion thông thường.
+    Các model như FLUX/SANA sử dụng transformer thay vì UNet như trong các mô hình Diffusion thông thường.
     Class này wrap transformer và thêm KV caching để tăng tốc quá trình sinh ảnh.
     """
     
@@ -234,7 +234,7 @@ class KVCacheTransformer(torch.nn.Module):
                     query = module.q_proj(hidden_states)
                     
                     # 3. Tính toán attention hiệu quả
-                    # Điều chỉnh tùy theo kiến trúc attention của SANA
+                    # Điều chỉnh tùy theo kiến trúc attention
                     try:
                         # Chuẩn bị dữ liệu đầu vào
                         batch_size, seq_len, _ = query.size()
@@ -369,39 +369,56 @@ class KVCacheTransformer(torch.nn.Module):
                     print(f"Error with only args: {e3}")
                     raise e  # Ném ngoại lệ ban đầu
 
-class OptimizedSANAPipeline:
-    """Pipeline for SANA model with KV caching optimization
+class OptimizedModelPipeline:
+    """Pipeline for diffusion models with KV caching optimization
     
-    Class này khởi tạo và quản lý SANA pipeline với tối ưu KV caching.
-    Thay vì sử dụng UNet như mô hình Diffusion khác, SANA sử dụng transformer.
+    Class này khởi tạo và quản lý diffusion pipeline với tối ưu KV caching.
+    Thay vì sử dụng UNet như mô hình Diffusion khác, các transformer model sử dụng transformer.
     """
     
-    def __init__(self, model_path="Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers"):
+    def __init__(self, model_path=None, transformer_path=None):
         """Initialize the pipeline with KV caching"""
         self.model_path = model_path
+        self.transformer_path = transformer_path
         self.pipeline = None
         self.kv_cached_transformer = None
         self.pipeline_type = None
         self.load_model()
         
     def load_model(self):
-        """Tải SANA model và áp dụng KV caching"""
+        """Tải model và áp dụng KV caching"""
         print(f"Loading model from {self.model_path}...")
         
         # Áp dụng tối ưu bộ nhớ
         setup_memory_optimizations()
         
         try:
-            # Tải pipeline
+            # Clear cache before loading
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            print("Loading model with memory optimizations...")
+            
+            # Tải pipeline with memory optimizations
+            # Using float16 instead of bfloat16 for better memory efficiency
             self.pipeline = DiffusionPipeline.from_pretrained(
                 self.model_path,
-                torch_dtype=torch.bfloat16,
+                torch_dtype=torch.bfloat16,  # Use float16 for better memory efficiency
                 use_safetensors=True,
+                low_cpu_mem_usage=True,     # Reduces CPU memory usage during loading
+                # variant="fp16",             # Use fp16 variant if available
             )
             
             # Lưu thông tin loại pipeline
             self.pipeline_type = type(self.pipeline).__name__
             print(f"Loaded pipeline: {self.pipeline_type}")
+            
+            # Enable memory saving features
+            self.pipeline.enable_attention_slicing(slice_size="max")  # Reduces peak memory usage
+            self.pipeline.enable_vae_slicing()  # Reduces VRAM for VAE
+            self.pipeline.enable_model_cpu_offload()  # Keep weights in CPU, offload to GPU when needed
+            print("Applied memory optimization: attention slicing, VAE slicing, CPU offload")
             
             # Kiểm tra và cảnh báo nếu là SCM model
             if ("scm" in self.model_path.lower() or 
@@ -413,8 +430,7 @@ class OptimizedSANAPipeline:
                 print("Any other value will be automatically adjusted to 2")
                 print("============================================\n")
             
-            # Chuyển đến GPU
-            self.pipeline = self.pipeline.to("cuda")
+            # No need to move to cuda explicitly since we're using model_cpu_offload
             
             # Kiểm tra cấu trúc pipeline
             print("\n=== Pipeline components ===")
@@ -423,10 +439,28 @@ class OptimizedSANAPipeline:
                 
             # Tìm thành phần transformer
             # transformer = self._locate_transformer()
-            model_path = "nunchaku-tech/nunchaku-sana/svdq-int4_r32-sana1.6b.safetensors"
-            transformer = NunchakuSanaTransformer2DModel.from_pretrained(model_path, offload=True)
-            # model_path = "nunchaku-tech/nunchaku-flux.1-dev/svdq-int4_r32-flux.1-dev.safetensors"
-            # transformer = NunchakuFluxTransformer2dModel.from_pretrained(model_path, offload=True)
+            
+            # Use transformer path from config if provided, otherwise try to determine from model
+            if self.transformer_path:
+                # Determine the correct model class based on the transformer path
+                if "sana" in self.transformer_path.lower():
+                    transformer = NunchakuSanaTransformer2DModel.from_pretrained(self.transformer_path, offload=True)
+                elif "flux" in self.transformer_path.lower():
+                    transformer = NunchakuFluxTransformer2dModel.from_pretrained(self.transformer_path, offload=True)
+                else:
+                    # Default to SANA model if we can't determine type
+                    print(f"Couldn't determine transformer type from path: {self.transformer_path}")
+                    print("Attempting to load as SANA transformer...")
+                    transformer = NunchakuSanaTransformer2DModel.from_pretrained(self.transformer_path, offload=True)
+            else:
+                # Fallback to hardcoded paths if no transformer path is provided
+                print("No transformer path provided, using fallback...")
+                if "flux" in self.model_path.lower():
+                    transformer_path = "nunchaku-tech/nunchaku-flux.1-dev/svdq-int4_r32-flux.1-dev.safetensors"
+                    transformer = NunchakuFluxTransformer2dModel.from_pretrained(transformer_path, offload=True)
+                else:
+                    transformer_path = "nunchaku-tech/nunchaku-sana/svdq-int4_r32-sana1.6b.safetensors"
+                    transformer = NunchakuSanaTransformer2DModel.from_pretrained(transformer_path, offload=True)
 
             # Tạo transformer có KV cache
             self.kv_cached_transformer = KVCacheTransformer(transformer)
@@ -518,7 +552,7 @@ class OptimizedSANAPipeline:
                     except:
                         pass
             
-            raise AttributeError("Could not locate transformer in the SANA pipeline structure")
+            raise AttributeError("Could not locate transformer in the pipeline structure")
     
     def _replace_transformer(self, original_transformer):
         """Thay thế transformer gốc bằng phiên bản có KV cache"""
@@ -1174,10 +1208,10 @@ def evaluate_model_metrics(generation_output_dir, resized_output_dir, val2017_di
     resized_original_dir = os.path.join(generation_output_dir, "resized_original")
     os.makedirs(resized_original_dir, exist_ok=True)
     
-    # Calculate FID score
+    # Calculate FID score (Subset) (Subset)
     try:
-        print("\n--- Calculating FID Score ---")
-        fid_score = calculate_fid(generation_output_dir, resized_output_dir, val2017_dir)
+        print("--- Calculating FID Score (Subset) ---")
+        fid_score = calculate_fid_subset(generation_output_dir, resized_output_dir, val2017_dir)
         metrics_results["fid_score"] = fid_score
     except Exception as e:
         print(f"Error calculating FID: {e}")
@@ -1253,34 +1287,63 @@ def evaluate_model_metrics(generation_output_dir, resized_output_dir, val2017_di
     
     return metrics_results
 
-def load_model_with_fallbacks(model_path=None):
-    """Tải model SANA với nhiều cơ chế dự phòng"""
-    print("Initializing SANA model with KV caching...")
+def load_model_with_fallbacks(model_path=None, transformer_path=None):
+    """Tải model với nhiều cơ chế dự phòng và tối ưu bộ nhớ"""
+    print("Initializing model with KV caching and memory optimizations...")
+    
+    # Apply aggressive memory optimizations before loading model
+    setup_memory_optimizations()
+    
+    # Set PyTorch memory allocation configuration to avoid fragmentation
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    
+    # Force garbage collection
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
     
     # Tìm đường dẫn model nếu chưa được chỉ định
     if model_path is None:
         try:
             config = load_config()
-            if config and "models" in config:
-                # Thử tìm SANA trong config
-                for model_key in ["SANA 1.6B", "SANA", "sana"]:
-                    if model_key in config["models"]:
+            if config and "models" in config and "model_params" in config:
+                # Get the model name from model_params
+                model_name = config["model_params"].get("model_name")
+                
+                # If model_name is specified, use that model's path
+                if model_name and model_name in config["models"]:
+                    model_path = config["models"][model_name]["path"]
+                    print(f"Found model path in config for {model_name}: {model_path}")
+                else:
+                    # Otherwise use the first model in the config
+                    for model_key in config["models"]:
                         model_path = config["models"][model_key]["path"]
-                        print(f"Found model path in config: {model_path}")
+                        print(f"Using first available model from config: {model_key} - {model_path}")
                         break
             
-            # Sử dụng đường dẫn mặc định nếu không tìm thấy trong config
+            # Use default model path if not found in config
             if model_path is None:
-                model_path = "Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers"
+                model_path = "black-forest-labs/FLUX.1-schnell"
                 print(f"Using default model path: {model_path}")
         except Exception as e:
             print(f"Error loading config: {e}")
-            model_path = "Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers"
+            model_path = "black-forest-labs/FLUX.1-schnell"
             print(f"Using default model path after error: {model_path}")
     
     # Khởi tạo pipeline
     try:
-        pipeline = OptimizedSANAPipeline(model_path="Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers")
+        # Get transformer path from config if available
+        transformer_path = None
+        if model_path and config and "models" in config:
+            # Look for the model in config
+            for model_key, model_info in config["models"].items():
+                if model_info.get("path") == model_path and "quant_path" in model_info:
+                    transformer_path = model_info["quant_path"]
+                    print(f"Found transformer path in config: {transformer_path}")
+                    break
+                    
+        pipeline = OptimizedModelPipeline(model_path=model_path, transformer_path=transformer_path)
         print("Model loaded successfully!")
         return pipeline
     except Exception as e:
@@ -1430,31 +1493,43 @@ def monitor_generation_vram(pipeline, prompt, use_cache=True, num_inference_step
     
     return results
 
-def main():
-    """Main function for running the SANA model with KV caching"""
-    parser = argparse.ArgumentParser(description="Run SANA model with KV caching optimization")
-    parser.add_argument("--prompt", type=str, default="a photo of a dog on a beach",
-                        help="Prompt for image generation")
-    parser.add_argument("--negative_prompt", type=str, default="",
-                        help="Negative prompt for image generation")
-    parser.add_argument("--steps", type=int, default=30,
-                        help="Number of inference steps")
-    parser.add_argument("--guidance_scale", type=float, default=7.5,
-                        help="Guidance scale for image generation")
-    parser.add_argument("--benchmark", action="store_true",
-                        help="Run benchmark comparing cached vs. non-cached performance")
-    parser.add_argument("--num_runs", type=int, default=3,
-                        help="Number of runs for benchmarking")
-    parser.add_argument("--interactive", action="store_true",
-                        help="Run in interactive mode to test multiple prompts")
-    parser.add_argument("--height", type=int, default=1024,
-                        help="Image height")
-    parser.add_argument("--width", type=int, default=1024,
-                        help="Image width")
-    parser.add_argument("--seed", type=int, default=None,
-                        help="Random seed for reproducibility")
-    parser.add_argument("--model_path", type=str, default=None,
-                        help="Path to the SANA model")
+def main(args=None):
+    """Main function for running models with KV caching"""
+    # Always initialize the parser
+    parser = argparse.ArgumentParser(description="Run diffusion models with KV caching optimization")
+    
+    # Helper function to safely get attributes from args
+    def get_attr(name, default):
+        return getattr(args, name, default)
+    
+    # Add arguments if we're not using pre-defined args
+    if args is None:
+        parser.add_argument("--prompt", type=str, default="a photo of a dog on a beach",
+                            help="Prompt for image generation")
+        parser.add_argument("--negative_prompt", type=str, default="",
+                            help="Negative prompt for image generation")
+        parser.add_argument("--steps", type=int, default=30,
+                            help="Number of inference steps")
+        parser.add_argument("--guidance_scale", type=float, default=7.5,
+                            help="Guidance scale for image generation")
+        parser.add_argument("--benchmark", action="store_true",
+                            help="Run benchmark comparing cached vs. non-cached performance")
+        parser.add_argument("--num_runs", type=int, default=3,
+                            help="Number of runs for benchmarking")
+        parser.add_argument("--interactive", action="store_true",
+                            help="Run in interactive mode to test multiple prompts")
+        parser.add_argument("--height", type=int, default=1024,
+                            help="Image height")
+        parser.add_argument("--width", type=int, default=1024,
+                            help="Image width")
+        parser.add_argument("--seed", type=int, default=None,
+                            help="Random seed for reproducibility")
+        parser.add_argument("--model_path", type=str, default=None,
+                            help="Path to the diffusion model")
+        parser.add_argument("--transformer_path", type=str, default=None,
+                            help="Path to the transformer model")
+        
+    # Always add these arguments regardless of whether args is None or not
     parser.add_argument("--debug", action="store_true",
                         help="Enable debug mode with extra logging")
     parser.add_argument("--use_coco", action="store_true",
@@ -1470,20 +1545,69 @@ def main():
     parser.add_argument("--monitor_vram", action="store_true",
                         help="Monitor VRAM usage during generation")
     
-    args = parser.parse_args()
+    # Parse arguments only if not provided
+    if args is None:
+        args = parser.parse_args()
+        
+    # Set up default values for required attributes
+    # This ensures these attributes are available regardless of how args was created
+    default_values = {
+        'debug': False,
+        'prompt': "a photo of a dog on a beach",
+        'negative_prompt': "",
+        'steps': 30,
+        'guidance_scale': 7.5,
+        'num_images': 10,
+        'skip_metrics': False,
+        'metrics_subset': 10,
+        'monitor_vram': False,
+        'seed': None,
+        'model_path': None,
+        'transformer_path': None,
+        'use_coco': False,
+        'use_flickr8k': False,
+        'height': 1024,
+        'width': 1024
+    }
+    
+    # Create dynamic attributes in args object if they don't exist
+    for attr_name, default_value in default_values.items():
+        if not hasattr(args, attr_name):
+            setattr(args, attr_name, default_value)
     
     # Login to Hugging Face if token provided
     login(token="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")
     
-    # Bật chế độ debug nếu được yêu cầu
-    if args.debug:
+    # Enable debug mode if requested
+    if hasattr(args, 'debug') and args.debug:
         import logging
         logging.basicConfig(level=logging.DEBUG)
         print("Debug mode enabled with verbose logging")
     
     try:
-        # Tải model với cơ chế dự phòng
-        pipeline = load_model_with_fallbacks(model_path=args.model_path)
+        print("\n=== Applying aggressive memory optimizations ===")
+        # Free up as much memory as possible before loading model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.reset_max_memory_allocated()
+            torch.cuda.reset_max_memory_cached()
+        
+        # Set memory allocation strategy
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+        
+        print("Initial CUDA memory stats:")
+        if torch.cuda.is_available():
+            print(f"Total CUDA memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+            print(f"Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+            print(f"Cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+        
+        # Default values for attributes that might not be in the args object
+        model_path = getattr(args, 'model_path', None)
+        transformer_path = getattr(args, 'transformer_path', None)
+        
+        # Load model with fallback mechanism
+        pipeline = load_model_with_fallbacks(model_path=model_path, transformer_path=transformer_path)
         
         # Create a list to store generation metadata
         generation_metadata = []
@@ -1491,7 +1615,7 @@ def main():
         # Keep track of generation time
         generation_times = {}
         
-        if args.use_coco:
+        if hasattr(args, 'use_coco') and args.use_coco:
             # Using COCO dataset for image generation
             print("\n=== Running with COCO dataset ===")
             
@@ -1505,9 +1629,12 @@ def main():
                 print("COCO dataset not found. Please download it first.")
                 return
             
+            # Get the number of images from args or use default
+            num_images = getattr(args, 'num_images', 10)
+            
             # Process COCO dataset to get captions
             print("\n=== Loading COCO Captions ===")
-            image_filename_to_caption, image_dimensions, _ = process_coco(annotations_dir)
+            image_filename_to_caption, image_dimensions, _ = process_coco(annotations_dir, limit=num_images)
             
             # Create output directories
             generation_output_dir = "kvcache/outputs/coco"
@@ -1519,7 +1646,7 @@ def main():
             print(f"Created directory for resized generated images: {resized_output_dir}")
             
             # Limit the number of images to generate
-            num_images_to_generate = min(args.num_images, len(image_filename_to_caption))
+            num_images_to_generate = min(num_images, len(image_filename_to_caption))
             print(f"\n=== Will generate {num_images_to_generate} images ===")
             
             # Generate images for COCO captions
@@ -1586,7 +1713,7 @@ def main():
             print("Image generation complete.")
             
             # Save generation metadata
-            metadata_file = os.path.join(generation_output_dir, "sana_kvcache_coco_metadata.json")
+            metadata_file = os.path.join(generation_output_dir, "kvcache_metadata.json")
             # write_generation_metadata_to_file(metadata_file)
             try:
                 with open(metadata_file, 'w', encoding='utf-8') as f:
@@ -1657,9 +1784,9 @@ def main():
                         print(f"{metric}: N/A")
             
                 # Save summary report
-                summary_file = os.path.join(generation_output_dir, "sana_kvcache_coco_summary.txt")
+                summary_file = os.path.join(generation_output_dir, "kvcache_summary.txt")
                 with open(summary_file, "w", encoding="utf-8") as f:
-                    f.write("=== SANA KV-Cache Generation Summary ===\n\n")
+                    f.write("=== KV-Cache Generation Summary ===\n\n")
                     f.write(f"Processed {num_images_to_generate} COCO captions\n")
                     f.write(f"Inference steps: {args.steps}\n")
                     f.write(f"Guidance scale: {args.guidance_scale}\n")
@@ -1688,7 +1815,7 @@ def main():
             else:
                 print("\n=== Skipping Image Quality Metrics (--skip_metrics flag set) ===") 
             
-        elif args.use_flickr8k:
+        elif hasattr(args, 'use_flickr8k') and args.use_flickr8k:
             # Using Flickr8k dataset for image generation
             print("\n=== Running with Flickr8k dataset ===")
             
@@ -1702,9 +1829,12 @@ def main():
                 print("Flickr8k dataset not found. Please download it first.")
                 return
             
+            # Get the number of images from args or use default
+            num_images = getattr(args, 'num_images', 10)
+            
             # Process Flickr8k dataset to get captions
             print("\n=== Loading Flickr8k Captions ===")
-            image_filename_to_caption, image_dimensions = process_flickr8k(images_dir, captions_file)
+            image_filename_to_caption, image_dimensions = process_flickr8k(images_dir, captions_file, limit=num_images)
             
             # Create output directories
             generation_output_dir = "kvcache/outputs/flickr8k"
@@ -1786,7 +1916,7 @@ def main():
             print("Image generation complete.")
             
             # Save generation metadata
-            metadata_file = os.path.join(generation_output_dir, "sana_kvcache_flickr8k_metadata.json")
+            metadata_file = os.path.join(generation_output_dir, "kvcache_metadata.json")
             # write_generation_metadata_to_file(metadata_file)
             try:
                 with open(metadata_file, 'w', encoding='utf-8') as f:
@@ -1856,9 +1986,9 @@ def main():
                         print(f"{metric}: N/A")
             
                 # Save summary report
-                summary_file = os.path.join(generation_output_dir, "sana_kvcache_flickr8k_summary.txt")
+                summary_file = os.path.join(generation_output_dir, "kvcache_summary.txt")
                 with open(summary_file, "w", encoding="utf-8") as f:
-                    f.write("=== SANA KV-Cache Generation Summary ===\n\n")
+                    f.write("=== KV-Cache Generation Summary ===\n\n")
                     f.write(f"Processed {num_images_to_generate} COCO captions\n")
                     f.write(f"Inference steps: {args.steps}\n")
                     f.write(f"Guidance scale: {args.guidance_scale}\n")
@@ -1887,75 +2017,9 @@ def main():
             else:
                 print("\n=== Skipping Image Quality Metrics (--skip_metrics flag set) ===") 
   
-        # elif args.benchmark:
-        #     # Chạy benchmark
-        #     if hasattr(pipeline, 'benchmark'):
-        #         pipeline.benchmark(
-        #             prompt=args.prompt,
-        #             negative_prompt=args.negative_prompt,
-        #             num_inference_steps=args.steps,
-        #             guidance_scale=args.guidance_scale,
-        #             num_runs=args.num_runs,
-        #             height=args.height,
-        #             width=args.width
-        #         )
-        #     else:
-        #         print("Benchmark mode not available for this pipeline")
-                
-        # elif args.interactive:
-        #     # Chế độ tương tác
-        #     if hasattr(pipeline, 'interactive_session'):
-        #         pipeline.interactive_session(
-        #             initial_prompt=args.prompt,
-        #             negative_prompt=args.negative_prompt,
-        #             num_inference_steps=args.steps,
-        #             guidance_scale=args.guidance_scale,
-        #             height=args.height,
-        #             width=args.width
-        #         )
-        #     else:
-        #         print("Interactive mode not available for this pipeline")
-                
-        # else:
-        #     # Sinh một ảnh
-        #     start_time = time.time()
-                
-        #     # Kiểm tra nếu đây là pipeline thông thường hay pipeline tùy chỉnh
-        #     if hasattr(pipeline, 'generate_image'):
-        #         image, _ = pipeline.generate_image(
-        #             prompt=args.prompt,
-        #             negative_prompt=args.negative_prompt,
-        #             num_inference_steps=args.steps,
-        #             guidance_scale=args.guidance_scale,
-        #             seed=args.seed,
-        #             height=args.height,
-        #             width=args.width
-        #         )
-        #     else:
-        #         # Sử dụng cách gọi tiêu chuẩn nếu không có generate_image
-        #         generator = None if args.seed is None else torch.Generator("cuda").manual_seed(args.seed)
-                
-        #         output = pipeline(
-        #             prompt=args.prompt,
-        #             negative_prompt=args.negative_prompt,
-        #             num_inference_steps=args.steps,
-        #             guidance_scale=args.guidance_scale,
-        #             height=args.height,
-        #             width=args.width,
-        #             generator=generator
-        #         )
-                
-        #         image = output.images[0]
-        #         print(f"Image generated in {time.time() - start_time:.2f} seconds")
-            
-        #     # Lưu ảnh
-        #     output_filename = f"output_{int(time.time())}.png"
-        #     image.save(output_filename)
-        #     print(f"Image saved as {output_filename}")
-            
     except Exception as e:
         # 4. Sửa lỗi chung - Hiển thị thông báo lỗi chi tiết
-        print(f"\n===== Error running SANA model =====")
+        print(f"\n===== Error running model =====")
         print(f"Error: {e}")
         import traceback
         traceback.print_exc()

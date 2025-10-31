@@ -41,7 +41,7 @@ from huggingface_hub import login
 # Add parent directory to path for importing modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared.resources_monitor import generate_image_and_monitor, monitor_vram, write_generation_metadata_to_file
-from metrics import calculate_fid, compute_image_reward, calculate_clip_score, calculate_lpips, calculate_psnr_resized
+from shared.metrics import calculate_fid_subset, compute_image_reward, calculate_clip_score, calculate_lpips, calculate_psnr_resized
 from shared.resizing_image import resize_images
 from dataset.flickr8k import process_flickr8k
 
@@ -492,7 +492,6 @@ class OptimizedDiffusionPipeline:
         
         # Detect if this is a FLUX model or other type of model
         is_flux_model = "flux" in self.model_path.lower()
-        
         # Step 1: Load model with quantization if applicable
         try:
             # if is_flux_model and HAS_NUNCHAKU:
@@ -627,16 +626,21 @@ class OptimizedDiffusionPipeline:
         # Construct model path based on precision
         # model_path = f"mit-han-lab/svdq-{precision}-flux.1-dev"
         # model_path = f"nunchaku-tech/nunchaku-flux.1-dev/svdq-{precision}_r32-flux.1-dev.safetensors"
-        model_path = f"nunchaku-tech/nunchaku-flux.1-schnell/svdq-{precision}_r32-flux.1-schnell.safetensors"
-        # model_path = f"nunchaku-tech/nunchaku-sana/svdq-{precision}_r32-sana1.6b.safetensors"
+        model_path = f"nunchaku-tech/nunchaku-flux.1-schnell/svdq-int4_r32-flux.1-schnell.safetensors"
+        # model_path = f"nunchaku-tech/nunchaku-sana/svdq-int4_r32-sana1.6b.safetensors"
         
         try:
             transformer = NunchakuFluxTransformer2dModel.from_pretrained(model_path, offload=True)
-            # transformer = NunchakuSanaTransformer2DModel.from_pretrained(model_path, offload=True)
+            # transformer = NunchakuSanaTransformer2DModel.from_pretrained(
+            #         model_path, 
+            #         offload=True,
+            #         num_attention_heads=self.num_heads,
+            #         attention_head_dim=self.head_dim)
         except Exception as e:
             print(f"Error loading model with precision {precision}: {e}")
         
-        return transformer, precision
+        
+            return transformer, precision
     
     def _locate_transformer(self):
         """Find the transformer component in the pipeline"""
@@ -793,8 +797,8 @@ class OptimizedDiffusionPipeline:
             print("Restored original transformer")
         else:
             print("No original transformer to restore")
-    
-    def generate_image(self, prompt, negative_prompt="", num_inference_steps=30, 
+
+    def generate_image(self, prompt, num_inference_steps=30, 
                       guidance_scale=7.5, seed=None, use_cache=True, height=1024, width=1024):
         """Generate an image using the optimized pipeline"""
         # Set seed if provided
@@ -819,16 +823,11 @@ class OptimizedDiffusionPipeline:
         
         # Prepare basic parameters
         kwargs = {
-            "prompt": prompt,
             "num_inference_steps": num_inference_steps,
             "guidance_scale": guidance_scale,
             "height": height,
             "width": width,
         }
-        
-        # Add negative_prompt only when supported
-        if negative_prompt and not is_sana_sprint:
-            kwargs["negative_prompt"] = negative_prompt
         
         # Set use_kv_cache state for transformer
         if hasattr(self.kv_cached_transformer, "use_kv_cache"):
@@ -930,7 +929,7 @@ class OptimizedDiffusionPipeline:
     def generate_images_with_dataset(self, image_filename_to_caption, output_dir, num_images=10, 
                                  num_inference_steps=30, guidance_scale=7.5, use_cache=True):
         """
-        Generate images using captions from COCO dataset
+        Generate images using captions from dataset
         
         Args:
             image_filename_to_caption: Dictionary mapping filenames to captions
@@ -968,7 +967,6 @@ class OptimizedDiffusionPipeline:
             try:
                 # Generate image with optimizations
                 image, generation_time = self.generate_image(
-                    prompt=prompt,
                     num_inference_steps=num_inference_steps,
                     guidance_scale=guidance_scale,
                     use_cache=use_cache
@@ -1308,7 +1306,7 @@ def main():
     parser = argparse.ArgumentParser(description="Combined Optimizations (Quantization, Pruning, KV Caching) with COCO dataset")
     
     # Model and optimization parameters
-    parser.add_argument("--model_path", type=str, default="Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers",
+    parser.add_argument("--model_path", type=str, default="black-forest-labs/FLUX.1-schnell",
                         help="Path to the model (HuggingFace repo ID or local path)")
     parser.add_argument("--pruning_amount", type=float, default=0.3, 
                         help="Amount of weights to prune (0.0 to 0.9)")
@@ -1388,7 +1386,7 @@ def main():
         images_dir = os.path.join(flickr8k_dir, "Images")
         captions_file = os.path.join(flickr8k_dir, "captions.txt")
         print("\n=== Loading Flickr8k Captions ===")
-        image_filename_to_caption, image_dimensions = process_flickr8k(images_dir, captions_file)
+        image_filename_to_caption, image_dimensions = process_flickr8k(images_dir, captions_file, limit=args.num_images)
 
         print(f"\n=== Generating Images for {len(image_filename_to_caption)} Flickr8k Captions ===")
         timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -1439,11 +1437,11 @@ def main():
             json.dump(vram_stats, f, indent=4)
         print(f"VRAM statistics saved to {vram_stats_path}")
     
-    # Continue with normal generation for all captions
+    # Continue with normal generation for all captions (already limited at dataset level)
     generation_times, generation_metadata = pipeline.generate_images_with_dataset(
         image_filename_to_caption, 
         output_dir, 
-        num_images=args.num_images,
+        num_images=len(image_filename_to_caption),
         num_inference_steps=args.steps, 
         guidance_scale=args.guidance_scale,
         use_cache=args.use_kv_cache
@@ -1469,10 +1467,10 @@ def main():
         except Exception as e:
             print(f"Error resizing images: {e}")
         
-        # Calculate FID score
+        # Calculate FID score (Subset) (Subset)
         try:
-            print("\n--- Calculating FID Score ---")
-            fid_score = calculate_fid(output_dir, resized_output_dir, original_dir)
+            print("--- Calculating FID Score (Subset) ---")
+            fid_score = calculate_fid_subset(output_dir, resized_output_dir, original_dir)
             metrics_results["fid_score"] = fid_score
             print(f"FID Score: {fid_score:.4f}")
         except Exception as e:

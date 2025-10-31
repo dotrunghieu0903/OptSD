@@ -9,6 +9,48 @@ from tqdm import tqdm
 import lpips
 import torchvision.transforms as transforms
 from transformers import CLIPProcessor, CLIPModel
+import shutil
+
+def prepare_corresponding_originals(original_dir, generated_dir, output_dir):
+    """
+    Copy original images that correspond to generated images to a new directory.
+    This ensures FID and other metrics are calculated only on the subset that was generated.
+    
+    Args:
+        original_dir: Directory containing all original images
+        generated_dir: Directory containing generated images
+        output_dir: Directory to copy corresponding original images to
+        
+    Returns:
+        Number of corresponding images found and copied
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Get list of generated image filenames
+    generated_files = [f for f in os.listdir(generated_dir) 
+                      if os.path.isfile(os.path.join(generated_dir, f)) 
+                      and f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
+    
+    copied_count = 0
+    not_found = []
+    
+    print(f"Looking for {len(generated_files)} corresponding original images...")
+    
+    for filename in generated_files:
+        original_path = os.path.join(original_dir, filename)
+        output_path = os.path.join(output_dir, filename)
+        
+        if os.path.exists(original_path):
+            shutil.copy2(original_path, output_path)
+            copied_count += 1
+        else:
+            not_found.append(filename)
+    
+    if not_found:
+        print(f"Warning: {len(not_found)} original images not found: {not_found[:5]}...")
+    
+    print(f"Successfully copied {copied_count} corresponding original images to {output_dir}")
+    return copied_count
 
 def calculate_fid(generated_image_dir, resized_generated_image_dir, validation_dataset_dir):
     """
@@ -25,7 +67,7 @@ def calculate_fid(generated_image_dir, resized_generated_image_dir, validation_d
     if not os.path.exists(validation_dataset_dir):
         print(f"Error: COCO validation directory does not exist: {validation_dataset_dir}")
         return None
-    print(f"Calculating FID between COCO dataset: {validation_dataset_dir}, Generated Image: {generated_image_dir}")
+    print(f"Calculating FID between dataset: {validation_dataset_dir}, Generated Image: {generated_image_dir}")
 
     # Make sure the directories exist and contain images before calculating FID
     try:
@@ -42,6 +84,68 @@ def calculate_fid(generated_image_dir, resized_generated_image_dir, validation_d
     except Exception as e:
         print(f"Error when calculating FID: {e}")
         return None
+
+def calculate_fid_subset(generated_image_dir, resized_generated_image_dir, original_dataset_dir, temp_dir=None):
+    """
+    Calculate the FID score between generated images and ONLY the corresponding subset of original images.
+    This ensures fair comparison when only generating a subset of the dataset.
+    
+    Args:
+        generated_image_dir: Directory containing generated images
+        resized_generated_image_dir: Directory containing resized generated images  
+        original_dataset_dir: Directory containing all original images
+        temp_dir: Temporary directory to store corresponding originals (optional)
+        
+    Returns:
+        FID score calculated on the subset
+    """
+    if not os.path.exists(generated_image_dir):
+        print(f"Error: Generated image directory does not exist: {generated_image_dir}")
+        return None
+
+    if not os.path.exists(resized_generated_image_dir):
+        print(f"Error: Resized generated image directory does not exist: {resized_generated_image_dir}")
+        return None
+
+    if not os.path.exists(original_dataset_dir):
+        print(f"Error: Original dataset directory does not exist: {original_dataset_dir}")
+        return None
+    
+    # Create temp directory for corresponding originals if not provided
+    if temp_dir is None:
+        temp_dir = os.path.join(os.path.dirname(resized_generated_image_dir), "corresponding_originals")
+    
+    try:
+        # Prepare corresponding original images
+        copied_count = prepare_corresponding_originals(original_dataset_dir, resized_generated_image_dir, temp_dir)
+        
+        if copied_count == 0:
+            print("Error: No corresponding original images found!")
+            return None
+        
+        print(f"Calculating FID between {copied_count} corresponding originals and generated images...")
+        
+        # Calculate FID using only the subset
+        score_fid = fid.compute_fid(
+            temp_dir,  # Use subset of originals
+            resized_generated_image_dir,  # Generated images
+            mode="clean",
+            num_workers=8,
+            batch_size=256
+        )
+
+        print(f"FID Score (subset): {score_fid:.4f}")
+        return score_fid
+        
+    except Exception as e:
+        print(f"Error when calculating FID subset: {e}")
+        return None
+    finally:
+        # Optionally clean up temp directory
+        # Note: Comment out if you want to keep the corresponding originals for inspection
+        # if temp_dir and os.path.exists(temp_dir):
+        #     shutil.rmtree(temp_dir)
+        pass
 
 # Calculate Image Reward
 def compute_image_reward(generated_dirpath, captions_dict):

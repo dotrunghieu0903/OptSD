@@ -1,8 +1,9 @@
 """
-This script applies advanced pruning techniques to a diffusion model
-and evaluates performance on captions from the COCO dataset.
-It includes multiple pruning methods: magnitude, structured, iterative, and attention head pruning.
-Image quality metrics calculated include: FID, CLIP Score, ImageReward, LPIPS, and PSNR.
+Pruned module for diffusion models.
+
+This module combines the basic pruning functionality with advanced pruning techniques 
+to optimize diffusion model weights, specifically targeting the transformer components.
+It supports multiple pruning methods with dataset-based evaluation.
 """
 
 import os
@@ -11,10 +12,15 @@ import json
 import random
 import argparse
 import torch
+import torch.nn as nn
+import torch.nn.utils.prune as prune
 import gc
-import itertools
 from tqdm import tqdm
 from PIL import Image
+
+from diffusers import FluxPipeline
+from nunchaku import NunchakuFluxTransformer2dModel
+from huggingface_hub import login
 
 # Add parent directory to path for importing modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,122 +28,383 @@ from dataset.flickr8k import process_flickr8k
 
 from shared.cleanup import setup_memory_optimizations_pruning
 from shared.resources_monitor import generate_image_and_monitor
-from metrics import calculate_fid, compute_image_reward, calculate_clip_score, calculate_lpips, calculate_psnr_resized
+from shared.metrics import calculate_fid_subset, compute_image_reward, calculate_clip_score, calculate_lpips, calculate_psnr_resized
 from shared.resizing_image import resize_images
-
-# Import from pruning module
-try:
-    # First try relative import for the pruning module in this directory
-    from .pruning import get_model_size, get_sparsity, apply_magnitude_pruning, apply_structured_pruning, iterative_pruning, prune_attention_heads
-except ImportError:
-    # Fall back to direct import if running as script
-    from pruning import get_model_size, get_sparsity, apply_magnitude_pruning, apply_structured_pruning, iterative_pruning, prune_attention_heads
-
-from huggingface_hub import login
-from diffusers import FluxPipeline
-from nunchaku import NunchakuFluxTransformer2dModel
 
 # Configure PyTorch memory management
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-# Authenticate with Hugging Face (replace with your own token if needed)
-login(token="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")
 
-def load_model():
-    """
-    Load the base diffusion model.
+# ----- Basic Pruning Functions -----
+
+def get_model_size(model):
+    """Calculate the size of the model in MB."""
+    param_size = 0
+    for param in model.parameters():
+        param_size += param.nelement() * param.element_size()
+    buffer_size = 0
+    for buffer in model.buffers():
+        buffer_size += buffer.nelement() * buffer.element_size()
     
-    Returns:
-        The loaded transformer model
+    size_mb = (param_size + buffer_size) / 1024**2
+    return size_mb
+
+def get_sparsity(model):
+    """Calculate the sparsity of the model."""
+    total_params = 0
+    zero_params = 0
+    
+    for param in model.parameters():
+        if param.requires_grad:
+            total_params += param.numel()
+            zero_params += (param == 0).sum().item()
+    
+    sparsity = 100.0 * zero_params / total_params if total_params > 0 else 0
+    return sparsity
+
+def apply_magnitude_pruning(model, amount=0.3, name_filter=None):
     """
-    print("Loading base model...")
+    Apply magnitude pruning to the model parameters.
+    
+    Args:
+        model: The model to prune
+        amount: The fraction of parameters to prune (0.0 to 1.0)
+        name_filter: Optional string to filter parameter names
+        
+    Returns:
+        The pruned model
+    """
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Linear) or isinstance(module, nn.Conv2d):
+            if name_filter is None or name_filter in name:
+                prune.l1_unstructured(module, name='weight', amount=amount)
+                # Make pruning permanent by removing the mask
+                prune.remove(module, 'weight')
+    
+    print(f"Applied {amount*100:.1f}% magnitude pruning to model")
+    print(f"Model sparsity after pruning: {get_sparsity(model):.2f}%")
+    return model
+
+def apply_structured_pruning(model, amount=0.3, dim=0, name_filter=None):
+    """
+    Apply structured pruning to the model parameters.
+    
+    Args:
+        model: The model to prune
+        amount: The fraction of parameters to prune (0.0 to 1.0)
+        dim: The dimension to prune (0 for row pruning, 1 for column pruning)
+        name_filter: Optional string to filter parameter names
+        
+    Returns:
+        The pruned model
+    """
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Linear) or isinstance(module, nn.Conv2d):
+            if name_filter is None or name_filter in name:
+                prune.ln_structured(module, name='weight', amount=amount, 
+                                   n=2, dim=dim)  # L2 norm along dimension
+                # Make pruning permanent by removing the mask
+                prune.remove(module, 'weight')
+    
+    print(f"Applied {amount*100:.1f}% structured pruning to model (dim={dim})")
+    print(f"Model sparsity after pruning: {get_sparsity(model):.2f}%")
+    return model
+
+def iterative_pruning(model, final_amount=0.3, steps=5, name_filter=None):
+    """
+    Apply iterative magnitude pruning to the model.
+    
+    Args:
+        model: The model to prune
+        final_amount: The final fraction to prune (0.0 to 1.0)
+        steps: Number of pruning steps
+        name_filter: Optional string to filter parameter names
+        
+    Returns:
+        The pruned model
+    """
+    step_amount = 1 - (1 - final_amount) ** (1 / steps)
+    
+    original_size = get_model_size(model)
+    print(f"Original model size: {original_size:.2f} MB")
+    
+    for i in range(steps):
+        print(f"Pruning step {i+1}/{steps}")
+        model = apply_magnitude_pruning(model, amount=step_amount, name_filter=name_filter)
+        
+    final_size = get_model_size(model)
+    print(f"Final model size: {final_size:.2f} MB")
+    print(f"Size reduction: {original_size - final_size:.2f} MB ({100 * (original_size - final_size) / original_size:.1f}%)")
+    
+    return model
+
+def prune_attention_heads(model, heads_to_prune):
+    """
+    Prune specific attention heads in a transformer model.
+    
+    Args:
+        model: The transformer model
+        heads_to_prune: Dict mapping layer indices to list of heads to prune
+        
+    Returns:
+        The pruned model
+    """
+    if hasattr(model, "prune_heads") and callable(model.prune_heads):
+        model.prune_heads(heads_to_prune)
+        print(f"Pruned attention heads: {heads_to_prune}")
+    else:
+        print("Model doesn't support attention head pruning")
+    
+    return model
+
+def load_and_prune_model(model_path, precision="fp4", pruning_amount=0.3, 
+                         structured=False, method="magnitude"):
+    """
+    Load a transformer model and apply pruning.
+    
+    Args:
+        model_path: Path to the model
+        precision: Precision to use (fp4, fp8, etc.)
+        pruning_amount: Amount of weights to prune
+        structured: Whether to use structured pruning
+        method: Pruning method ("magnitude", "random", "attention_heads")
+        
+    Returns:
+        The pruned transformer model
+    """
+    print(f"Loading model from {model_path} with precision {precision}")
     
     # Load the transformer model
-    model_path = "nunchaku-tech/nunchaku-flux.1-dev/svdq-int4_r32-flux.1-dev.safetensors"
-    # model_path = "nunchaku-tech/nunchaku-flux.1-schnell/svdq-int4_r32-flux.1-schnell.safetensors"
-    transformer = NunchakuFluxTransformer2dModel.from_pretrained(model_path, offload=True)
+    transformer = NunchakuFluxTransformer2dModel.from_pretrained(model_path)
     
-    original_size = get_model_size(transformer)
-    print(f"Original model size: {original_size:.2f} MB")
+    # Record size before pruning
+    size_before = get_model_size(transformer)
+    print(f"Model size before pruning: {size_before:.2f} MB")
+    
+    # Apply pruning based on method
+    if method == "magnitude":
+        if structured:
+            transformer = apply_structured_pruning(transformer, amount=pruning_amount)
+        else:
+            transformer = apply_magnitude_pruning(transformer, amount=pruning_amount)
+    elif method == "iterative":
+        transformer = iterative_pruning(transformer, final_amount=pruning_amount, steps=5)
+    elif method == "attention_heads":
+        # Example: prune 20% of heads in each layer
+        num_layers = len([name for name, _ in transformer.named_modules() 
+                         if "attention" in name and "output" in name])
+        num_heads = 8  # Typically 8 or 12 heads per layer, adjust as needed
+        heads_per_layer = max(1, int(num_heads * pruning_amount))
+        
+        heads_to_prune = {}
+        for i in range(num_layers):
+            heads_to_prune[i] = list(range(heads_per_layer))
+            
+        transformer = prune_attention_heads(transformer, heads_to_prune)
+        
+    # Record size after pruning
+    size_after = get_model_size(transformer)
+    print(f"Model size after pruning: {size_after:.2f} MB")
+    print(f"Size reduction: {size_before - size_after:.2f} MB ({100 * (size_before - size_after) / size_before:.1f}%)")
+    
+    return transformer
+
+def create_pruned_pipeline(model_path, precision="fp4", pruning_amount=0.3,
+                           structured=False, method="magnitude"):
+    """
+    Create a pipeline with a pruned transformer.
+    
+    Args:
+        model_path: Path to the model
+        precision: Precision to use
+        pruning_amount: Amount of weights to prune
+        structured: Whether to use structured pruning
+        method: Pruning method
+        
+    Returns:
+        The FluxPipeline with a pruned transformer
+    """
+    # Load and prune the transformer
+    transformer = load_and_prune_model(
+        model_path=model_path,
+        precision=precision,
+        pruning_amount=pruning_amount,
+        structured=structured,
+        method=method
+    )
+    
+    # Create the pipeline with the pruned transformer
+    pipeline = FluxPipeline.from_pretrained(
+        "black-forest-labs/FLUX.1-dev", 
+        transformer=transformer,
+        torch_dtype=torch.bfloat16
+    ).to("cuda")
+    
+    return pipeline
+
+def benchmark_pruned_model(pipeline, prompts, num_inference_steps=50, guidance_scale=3.5):
+    """
+    Benchmark a pruned model on image generation.
+    
+    Args:
+        pipeline: The diffusion pipeline
+        prompts: List of prompts to test
+        num_inference_steps: Number of inference steps
+        guidance_scale: Guidance scale for generation
+        
+    Returns:
+        Dict with benchmark results
+    """
+    results = {
+        "times": [],
+        "images": []
+    }
+    
+    for i, prompt in enumerate(tqdm(prompts, desc="Generating images")):
+        start_time = time.time()
+        
+        # Generate the image
+        image = pipeline(
+            prompt,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale
+        ).images[0]
+        
+        end_time = time.time()
+        generation_time = end_time - start_time
+        
+        results["times"].append(generation_time)
+        results["images"].append(image)
+        
+        print(f"Prompt {i+1}/{len(prompts)}: Generated in {generation_time:.2f}s")
+    
+    avg_time = sum(results["times"]) / len(results["times"])
+    print(f"Average generation time: {avg_time:.2f}s")
+    
+    return results
+
+def save_pruning_results(results, output_dir="output"):
+    """
+    Save the images and benchmark results.
+    
+    Args:
+        results: Dict with benchmark results
+        output_dir: Directory to save output
+    """
+    # Create the output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Save the images
+    for i, image in enumerate(results["images"]):
+        image_path = os.path.join(output_dir, f"pruned_image_{i}.png")
+        image.save(image_path)
+    
+    # Save the benchmark results
+    benchmark_path = os.path.join(output_dir, "benchmark_results.txt")
+    with open(benchmark_path, "w") as f:
+        f.write("Pruned Model Benchmark Results\n")
+        f.write("--------------------------\n")
+        f.write(f"Number of images: {len(results['images'])}\n")
+        f.write(f"Average generation time: {sum(results['times']) / len(results['times']):.2f}s\n")
+        f.write("\nIndividual generation times:\n")
+        for i, t in enumerate(results["times"]):
+            f.write(f"Image {i+1}: {t:.2f}s\n")
+    
+    print(f"Results saved to {output_dir}")
+
+
+# ----- Advanced Pruning Functions -----
+
+def load_model(model_name=None):
+    print("Loading base model...")
+    
+    # Load configuration from config.json
+    config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config.json')
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    
+    # Get model paths from config.json
+    models = config.get("models", {})
+    
+    if model_name is None:
+        model_name = config.get("model_params", {}).get("model_name", "Flux.1-dev")
+    
+    if model_name in models:
+        model_info = models[model_name]
+        model_path = model_info.get("path")
+        transformer_path = model_info.get("quant_path")
+        print(f"Using model: {model_name}")
+        print(f"Model path: {model_path}")
+        print(f"Transformer path: {transformer_path}")
+    else:
+        print(f"Model {model_name} not found in config.json. Using default path.")
+        transformer_path = "nunchaku-tech/nunchaku-flux.1-dev/svdq-int4_r32-flux.1-dev.safetensors"
+    
+    # Load the transformer model
+    transformer = NunchakuFluxTransformer2dModel.from_pretrained(transformer_path)
     
     return transformer
 
 def create_pipeline(transformer):
     """
-    Create a diffusion pipeline using the provided transformer.
+    Create a pipeline with the provided transformer model.
     
     Args:
-        transformer: The transformer model
+        transformer: The transformer model to use in the pipeline
         
     Returns:
-        The diffusion pipeline
+        The FluxPipeline with the transformer
     """
-    pipe_path = "black-forest-labs/FLUX.1-dev"
-    # pipe_path = "black-forest-labs/FLUX.1-schnell"
-    # pipe_path = "Efficient-Large-Model/SANA1.5_1.6B_1024px_diffusers"
-    # Create the pipeline with memory optimizations
     pipeline = FluxPipeline.from_pretrained(
-        pipe_path,
+        "black-forest-labs/FLUX.1-dev", 
         transformer=transformer,
-        torch_dtype=torch.bfloat16,
-        low_cpu_mem_usage=True
+        torch_dtype=torch.bfloat16
     ).to("cuda")
     
-    # Enable memory efficient attention if available
-    if hasattr(pipeline, "enable_attention_slicing"):
-        pipeline.enable_attention_slicing(1)
+    # Clear memory
+    torch.cuda.empty_cache()
+    gc.collect()
     
-    if hasattr(pipeline, "enable_model_cpu_offload"):
-        pipeline.enable_model_cpu_offload()
-        
     return pipeline
 
 def enhance_caption(caption):
     """
-    Enhance a caption to make it more suitable for image generation.
+    Enhance a caption with details to improve image quality.
     
     Args:
-        caption: The original caption
+        caption: The base caption
         
     Returns:
         Enhanced caption
     """
-    # Remove any dots at the end
-    caption = caption.rstrip('.')
-    
-    # Add prefixes that help with generation quality
-    enhanced_prefixes = [
-        "a high quality photo of",
-        "a detailed image showing",
-        "a professional photograph of",
-        "a clear picture depicting"
+    quality_prefixes = [
+        "a high quality photo of", 
+        "a detailed photograph of",
+        "a professional photograph depicting",
+        "a sharp and clear image of",
+        "a high resolution picture showing"
     ]
     
-    # Select a random prefix
-    prefix = random.choice(enhanced_prefixes)
-    
-    # Combine prefix with caption and ensure first letter of caption is lowercase
-    if caption and caption[0].isupper():
-        caption = caption[0].lower() + caption[1:]
-    
-    enhanced_caption = f"{prefix} {caption}"
-    
-    # Add suffix to improve quality
-    enhanced_suffixes = [
-        ", high detail, professional lighting",
-        ", sharp focus, high resolution",
-        ", vibrant colors, professional photograph",
-        ", detailed, realistic, high quality"
+    quality_suffixes = [
+        ", high quality, detailed, sharp focus, professional photography",
+        ", high resolution, highly detailed, professional photo",
+        ", clear details, crisp focus, professional lighting",
+        ", 8k resolution, detailed, professional",
+        ", crystal clear, detailed texture, professional photograph"
     ]
     
-    suffix = random.choice(enhanced_suffixes)
-    enhanced_caption = enhanced_caption + suffix
+    # Skip enhancement if caption already has quality terms
+    quality_terms = ["high quality", "detailed", "professional", "8k", "clear", "sharp", "resolution"]
+    if any(term in caption.lower() for term in quality_terms):
+        return caption
     
+    # Add prefix and suffix for quality
+    enhanced_caption = random.choice(quality_prefixes) + " " + caption + random.choice(quality_suffixes)
     return enhanced_caption
 
 def filter_good_captions(caption):
     """
-    Filter out captions that might lead to poor generation.
+    Filter out captions that are likely to produce poor results.
     
     Args:
         caption: The caption to check
@@ -145,97 +412,78 @@ def filter_good_captions(caption):
     Returns:
         True if the caption is good, False otherwise
     """
-    # Skip very short captions
-    if len(caption.split()) < 4:
+    # Skip captions that are too short
+    if len(caption.split()) < 3:
         return False
     
-    # Skip captions with unwanted patterns
-    unwanted_patterns = [
-        "this is", "there is", "these are", "this picture",
-        "photo of", "picture of", "image of", "snapshot",
-        "it is", "it's a", "its a"
+    # Skip captions with specific problematic terms
+    problematic_terms = [
+        "ferris wheel", "clock tower", "giraffe", "zebra", "kite", "tennis", 
+        "skate", "ski", "skateboard", "surfboard", "baseball", "football", 
+        "soccer", "basketball", "stop sign", "traffic light", "fire hydrant",
+        "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow"
     ]
     
-    lower_caption = caption.lower()
-    for pattern in unwanted_patterns:
-        if pattern in lower_caption:
-            return False
+    if any(term.lower() in caption.lower() for term in problematic_terms):
+        return False
     
     return True
 
 def load_coco_captions(annotations_file, limit=500):
     """
-    Load captions from COCO dataset with filtering and enhancement.
+    Load captions from the COCO dataset.
     
     Args:
-        annotations_file: Path to COCO annotations file
+        annotations_file: Path to the COCO annotations file
         limit: Maximum number of captions to load
         
     Returns:
-        Dictionary mapping image filenames to captions
+        Dictionary mapping filenames to captions and image dimensions
     """
-    print(f"Loading COCO captions from {annotations_file}")
+    print(f"Loading captions from {annotations_file}")
     
     with open(annotations_file, 'r') as f:
-        captions_data = json.load(f)
+        data = json.load(f)
     
-    # Build mapping from image_id to dimensions and filename
-    image_id_to_dimensions = {
-        img['id']: (img['width'], img['height'], img['file_name'])
-        for img in captions_data['images']
-    }
+    # Create mapping of image_id to filename
+    id_to_filename = {}
+    for img in data["images"]:
+        # COCO filenames are 12 digits padded with zeros, e.g., 000000039769.jpg
+        id_to_filename[img["id"]] = img["file_name"]
+        
+    # Create mapping of image_id to dimensions
+    id_to_dimensions = {}
+    for img in data["images"]:
+        id_to_dimensions[img["id"]] = (img["width"], img["height"])
     
-    print(f"Loaded {len(captions_data['annotations'])} annotations from COCO")
+    # Create mapping of filename to caption
+    filename_to_caption = {}
+    filename_to_dimensions = {}
     
-    # Group captions by image_id
-    captions_by_image = {}
-    for annotation in captions_data['annotations']:
-        image_id = annotation['image_id']
-        caption = annotation['caption']
-        if image_id not in captions_by_image:
-            captions_by_image[image_id] = []
-        captions_by_image[image_id].append(caption)
-    
-    print(f"Found captions for {len(captions_by_image)} unique images")
-    
-    # Select the best caption for each image
-    image_filename_to_caption = {}
-    image_dimensions = {}  # Store {filename: (width, height)}
-    processed_count = 0
-    
-    for image_id, captions in captions_by_image.items():
-        if image_id not in image_id_to_dimensions:
-            continue
+    # Filter and enhance captions
+    for ann in data["annotations"]:
+        image_id = ann["image_id"]
+        caption = ann["caption"]
+        
+        # Only include captions that pass the filter
+        if filter_good_captions(caption):
+            # Enhance the caption
+            enhanced_caption = enhance_caption(caption)
             
-        # Find the best caption (longest caption after filtering)
-        good_captions = [c for c in captions if filter_good_captions(c)]
-        if not good_captions:
-            # If no good captions, use the longest one
-            good_captions = captions
+            # Get the filename and dimensions
+            filename = id_to_filename[image_id]
+            dimensions = id_to_dimensions[image_id]
             
-        # Sort by length and choose the longest
-        best_caption = sorted(good_captions, key=len, reverse=True)[0]
-        
-        # Enhance the caption
-        enhanced_caption = enhance_caption(best_caption)
-        
-        # Store the enhanced caption and dimensions
-        width, height, original_filename = image_id_to_dimensions[image_id]
-        image_filename_to_caption[original_filename] = enhanced_caption
-        image_dimensions[original_filename] = (width, height)
-        
-        processed_count += 1
-        if processed_count >= limit:
-            break
+            # Add to the mappings
+            filename_to_caption[filename] = enhanced_caption
+            filename_to_dimensions[filename] = dimensions
+            
+            # Stop once we have enough captions
+            if len(filename_to_caption) >= limit:
+                break
     
-    print(f"Selected and enhanced {len(image_filename_to_caption)} captions (limit: {limit})")
-    
-    # Print some examples of enhanced captions
-    print("\nExample enhanced captions:")
-    for filename, caption in itertools.islice(image_filename_to_caption.items(), 3):
-        print(f"  - {filename}: {caption}")
-    
-    return image_filename_to_caption, image_dimensions
+    print(f"Loaded {len(filename_to_caption)} captions")
+    return filename_to_caption, filename_to_dimensions
 
 def apply_pruning_method(transformer, method, amount, structured_dim=0, iterative_steps=5):
     """
@@ -249,7 +497,7 @@ def apply_pruning_method(transformer, method, amount, structured_dim=0, iterativ
         iterative_steps: Number of steps for iterative pruning
         
     Returns:
-        The pruned transformer
+        The pruned transformer and statistics
     """
     print(f"Applying {method} pruning with amount {amount}...")
     
@@ -279,25 +527,23 @@ def apply_pruning_method(transformer, method, amount, structured_dim=0, iterativ
     
     # Calculate model size after pruning
     pruned_size = get_model_size(pruned_transformer)
-    size_reduction = original_size - pruned_size
-    size_reduction_percentage = 100 * size_reduction / original_size if original_size > 0 else 0
-    
-    sparsity = get_sparsity(pruned_transformer)
+    pruning_stats = {
+        "method": method,
+        "amount": amount,
+        "original_size_mb": original_size,
+        "pruned_size_mb": pruned_size,
+        "size_reduction_mb": original_size - pruned_size,
+        "size_reduction_percent": 100 * (original_size - pruned_size) / original_size,
+        "sparsity_percent": get_sparsity(pruned_transformer)
+    }
     
     print(f"Original model size: {original_size:.2f} MB")
     print(f"Pruned model size: {pruned_size:.2f} MB")
-    print(f"Size reduction: {size_reduction:.2f} MB ({size_reduction_percentage:.1f}%)")
-    print(f"Model sparsity after pruning: {sparsity:.2f}%")
-    
-    pruning_stats = {
-        "original_size_mb": original_size,
-        "pruned_size_mb": pruned_size,
-        "size_reduction_mb": size_reduction,
-        "size_reduction_percent": size_reduction_percentage,
-        "sparsity_percent": sparsity
-    }
+    print(f"Size reduction: {original_size - pruned_size:.2f} MB ({pruning_stats['size_reduction_percent']:.1f}%)")
+    print(f"Model sparsity: {pruning_stats['sparsity_percent']:.2f}%")
     
     return pruned_transformer, pruning_stats
+
 
 def main(args=None):
     # If no args provided, parse them from command line
@@ -323,19 +569,20 @@ def main(args=None):
                             help="Skip calculation of image quality metrics")
         parser.add_argument("--metrics_subset", type=int, default=100,
                             help="Number of images to use for metrics calculation (default: 100)")
-        parser.add_argument("--output_dir", type=str, default="pruning/advanced_pruned_outputs",
-                            help="Directory to save output images and metrics")
         parser.add_argument("--use_flickr8k", action="store_true",
                             help="Use Flickr8k dataset instead of COCO")
-        # parser.add_argument("--use_coco", action="store_true",
-        #                     help="Use COCO dataset")
+        parser.add_argument("--model_name", type=str, default="Flux.1-dev",
+                            help="Name of the model to use from config.json")
         args = parser.parse_args()
     
+    # Authenticate with Hugging Face
+    login(token="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")
+
     # Setup memory optimizations to avoid CUDA OOM errors
     setup_memory_optimizations_pruning()
     
     # Create output directories
-    output_dir = args.output_dir
+    output_dir = "pruning/output"
     os.makedirs(output_dir, exist_ok=True)
 
     image_filename_to_caption = {}
@@ -349,7 +596,7 @@ def main(args=None):
         flickr_caption_path = f"{flickr8k_dir}/captions.txt"
         original_dir = f"{flickr8k_dir}/Images"
         image_filename_to_caption, image_dimensions = process_flickr8k(
-            original_dir, flickr_caption_path
+            original_dir, flickr_caption_path, limit=args.num_images
         )
     else:
         # Load COCO dataset
@@ -367,16 +614,23 @@ def main(args=None):
 
     # 2. Load the model
     print("\n=== Loading Base Model ===")
-    transformer = load_model()
+    model_name = getattr(args, 'model_name', None)
+    transformer = load_model(model_name)
     
     # 3. Apply pruning to the model based on selected method
-    print(f"\n=== Applying {args.pruning_method} Pruning to Model ===")
+    # Get method from args or use default
+    pruning_method = getattr(args, 'pruning_method', "magnitude")
+    pruning_amount = getattr(args, 'pruning_amount', 0.3)
+    structured_dim = getattr(args, 'structured_dim', 0)
+    iterative_steps = getattr(args, 'iterative_steps', 5)
+    
+    print(f"\n=== Applying {pruning_method} Pruning to Model ===")
     pruned_transformer, pruning_stats = apply_pruning_method(
         transformer, 
-        method=args.pruning_method,
-        amount=args.pruning_amount,
-        structured_dim=args.structured_dim,
-        iterative_steps=args.iterative_steps
+        method=pruning_method,
+        amount=pruning_amount,
+        structured_dim=structured_dim,
+        iterative_steps=iterative_steps
     )
     
     # Create pipeline with the pruned model
@@ -411,7 +665,8 @@ def main(args=None):
     # Keep track of generation time
     generation_times = {}
     
-    filenames_captions = list(image_filename_to_caption.items())[:args.num_images]
+    # Use all captions since they're already limited at dataset level
+    filenames_captions = list(image_filename_to_caption.items())
     for i, (filename, prompt) in enumerate(tqdm(filenames_captions, desc="Generating images")):
         output_path = os.path.join(output_dir, filename)
         
@@ -467,11 +722,11 @@ def main(args=None):
         except Exception as e:
             print(f"Error resizing images: {e}")
         
-        # Calculate FID score
+        # Calculate FID score (Subset) (Subset)
         try:
-            print("\n--- Calculating FID Score ---")
+            print("--- Calculating FID Score (Subset) ---")
             
-            fid_score = calculate_fid(output_dir, resized_output_dir, original_dir)
+            fid_score = calculate_fid_subset(output_dir, resized_output_dir, original_dir)
             metrics_results["fid_score"] = fid_score
         except Exception as e:
             print(f"Error calculating FID: {e}")
@@ -590,7 +845,7 @@ def main(args=None):
     # Save summary report
     with open(os.path.join(output_dir, f"{args.pruning_method}_pruning_summary.txt"), "w", encoding='utf-8') as f:
         f.write(f"=== {args.pruning_method.capitalize()} Pruning Summary ===\n\n")
-        f.write(f"Processed {len(image_filename_to_caption)} COCO captions\n")
+        f.write(f"Processed {len(image_filename_to_caption)} captions\n")
         f.write(f"Inference steps: {args.steps}\n")
         f.write(f"Guidance scale: {args.guidance_scale}\n")
         f.write(f"Pruning method: {args.pruning_method}\n")
