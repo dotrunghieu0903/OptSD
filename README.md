@@ -308,7 +308,8 @@ If you use this reproduction package, please cite:
 
 ```bibtex
 @misc{optsd_reproduction_2025,
-  title={OptSD: Reproducible Optimization Techniques for Stable Diffusion},
+  title={OptSD: The Efficiency Diffusion Models and Optimization
+Techniques: A Comprehensive Review},
   author={[Trung-Hieu Do and Vinh-Tiep Nguyen]},
   year={2025},
   howpublished={\url{https://github.com/dotrunghieu0903/OptSD}}
